@@ -14,13 +14,15 @@ by a Vulkan backend running on NVK (Mesa). RSX shaders are translated to SPIR-V 
 
 ## Status
 
-> [!IMPORTANT]
-> **Paused until next week:** I ran out of tokens for the AI I use to develop this port; they renew next week and work
-> resumes then. The plan is in [PORT_STATUS.md](PORT_STATUS.md).
+![Main menu running on the Switch](docs/img/menu_principal_2026-11-27.jpg)
 
-**Latest (Nov 13):** from ~1.9 to **~3 FPS (overclocked)** with MLAA off, a cache for the color-grading LUT and a PPU
-wait backoff. The bottleneck is no longer the SPUs but the RSX thread, which submits and waits on a fence for every
-draw; draw batching is being tested. Estimated odds: 30 FPS without OC ~10 %, 15-20 FPS ~30-40 %.
+*Main menu running on the Switch (2026-11-27).*
+
+**Latest (Nov 27):** it now **reaches the main menu with no hangs** (2,400+ frames per test) at ~315 ms per frame
+(~3 FPS, overclocked). The "hang" on the RSX semaphore at label 0x4F0 was a false positive of the
+`GCM_SEMA_ACQUIRE_MS` timeout (fixed in `cellGcmSys.c`), and the PPU-side workaround was reverted. The EDGE geometry
+jobs are identified (`rjm_434600` and `rjm_459100`): in the menu the main thread spends ~36 % of each frame waiting on
+them. Also found: on the Switch no host thread gets its own priority yet.
 
 **Work in progress, not playable yet. Overall progress: ~25%.**
 
@@ -38,8 +40,9 @@ On the console, at stock clocks with no overclock, it boots, reads the PSARCs, r
 studio logos and credits (~45 FPS), plays the intro video and draws the **brightness calibration screen** with the
 game's own shaders (32 of 32 pipelines OK).
 
-**Where it is stuck:** past the intro it runs at ~3 FPS (overclocked). The bottleneck is the RSX thread (Vulkan
-backend), which waits on the GPU for every draw; with draw batching it hung at flip 870 and the fix is untested.
+**Where it is stuck:** performance. The main menu runs at ~315 ms per frame (overclocked) with the 3 cores at
+88-99 %, shared by the main thread and the SPU jobs (EDGE, audio). Next: per-thread priorities for the SPURS workers,
+then re-lifting EDGE and rewriting its hottest functions natively (NEON).
 
 **Goals:**
 - **30 FPS without overclock.** This is the hardest one: the game leans heavily on all 6 SPUs, which run on 3 A57

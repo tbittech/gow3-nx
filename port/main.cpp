@@ -100,6 +100,8 @@ extern int32_t g_sys_process_exit_code;
 /* Host-provided symbols the runtime and the HLE libraries link against. */
 uint8_t* vm_base = nullptr;
 int g_gow3_disable_mlaa = 0;   /* 50a: read by func_00230DC4 (ppu_recomp_004.cpp) */
+extern "C" { int g_gow3_skip_intro = 0;  /* 68a: func_001E5440 (ppu_recomp_003.cpp) */
+             int g_gow3_skip_videos = 0; /* 68b: func_0026FCCC (ppu_recomp_004.cpp) */ }
 extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
 
 /* Guest-callback dispatch. g_ps3_guest_caller is the hook the HLE runtime
@@ -185,6 +187,9 @@ extern "C" int  rsx_null_backend_pump_messages(void);
  * took. A hidden or occluded window makes present block hard, and pacing the
  * ticks behind it paces the whole game behind it. */
 static volatile LONG g_frames_presented = 0;
+#ifdef __SWITCH__
+extern "C" void at_vblank(void);   /* 92a: --at-clock=vblank (replay por tiempo de juego) */
+#endif
 
 /* Frames handed to the backend at a guest FLIP boundary -- one per frame the
  * guest actually finished. The presents made before the guest's first flip, so
@@ -222,6 +227,9 @@ static DWORD WINAPI frame_clock(LPVOID)
         int fired = 0;
         while ((long long)(now - next_tick) >= 0 && fired < 240) {
             cellGcmTickVBlank();
+#ifdef __SWITCH__
+            at_vblank();
+#endif
             cellGcmTickFlip();
             /* Present a pending flip BEFORE draining any further. The flip
              * fires at a get==put frame boundary on the guest thread, so the
@@ -411,6 +419,8 @@ static int run_guest(uint32_t entry, uint32_t stack_top) { return ppu_run(entry,
 #ifdef __SWITCH__
 /* Switch: sin argumentos se usa el EBOOT de la SD; stdout/stderr van a nxlink (si hay) y a un log en la SD. */
 #include <switch.h>
+#define AUTOTEST_IMPLEMENTATION
+#include "autotest.h"
 #define GOW3_NX_DIR   "sdmc:/switch/gow3-nx"
 #define GOW3_NX_EBOOT GOW3_NX_DIR "/PS3_GAME/USRDIR/EBOOT.ELF"
 static int s_nxlink = -1;
@@ -503,6 +513,7 @@ static void title_environment(void)
     env_default("PS3RECOMP_VK_GUEST_PROGRAMS", "1");
     mkdir("sdmc:/switch/gow3-nx/spirv_cache", 0777);
     env_default("PS3RECOMP_SPIRV_CACHE", "sdmc:/switch/gow3-nx/spirv_cache");
+    env_default("PS3RECOMP_VK_PIPECACHE", "sdmc:/switch/gow3-nx/vk_pipecache.bin");   /* 90a */
 #endif
 }
 
@@ -573,8 +584,40 @@ static void* guest_sampler(void* arg)
     }
     return nullptr;
 }
+/* 71a: PPU_PEEK="ea[+off],...[@secs]" (hex): every secs (5) log the BE u32 at ea;
+ * with +off, also the 4 u32 at (*ea)+off. Example: 528A64+40,5284E8+8,5278BC+0@5 */
+static inline uint32_t peek_be32(uint32_t ea) { return __builtin_bswap32(*(volatile uint32_t*)(vm_base + ea)); }
+static void* ppu_peek(void* arg)
+{
+    const char* spec = (const char*)arg;
+    const char* at = strchr(spec, '@');
+    const unsigned secs = at ? (unsigned)atoi(at + 1) : 5;
+    for (;;) {
+        sleep(secs ? secs : 5);
+        for (const char* p = spec; *p && *p != '@'; ) {
+            char* e; uint32_t ea = (uint32_t)strtoul(p, &e, 16);
+            if (e == p || ea < 0x10000) break;   /* bad spec */
+            fprintf(stderr, "[peek] %08X = %08X", ea, peek_be32(ea)); fflush(stderr);
+            if (*e == '+') {
+                uint32_t q = peek_be32(ea) + (uint32_t)strtoul(e + 1, &e, 16);
+                if (q >= 0x10000 && q < 0x40000000)
+                    fprintf(stderr, " | [%08X] %08X %08X %08X %08X", q,
+                            peek_be32(q), peek_be32(q + 4), peek_be32(q + 8), peek_be32(q + 12));
+            }
+            fprintf(stderr, "\n");
+            p = (*e == ',') ? e + 1 : e;
+            if (p == e && *p != '@' && *p) break;   /* bad spec */
+        }
+        fflush(stderr);
+    }
+    return nullptr;
+}
 static void hang_watchdog_start(void)
 {
+    if (const char* pk = getenv("PPU_PEEK")) if (*pk) {
+        pthread_t pt;
+        if (pthread_create(&pt, nullptr, ppu_peek, (void*)pk) == 0) pthread_detach(pt);
+    }
     if (const char* ps = getenv("GOW3_PROF")) if (*ps) {
         pthread_t pt;
         if (pthread_create(&pt, nullptr, guest_sampler, (void*)ps) == 0) pthread_detach(pt);
@@ -590,8 +633,40 @@ int main(int argc, char** argv)
 {
 #ifdef __SWITCH__
     nx_boot_io();
+    /* 92a: --at-dump-input=PATH prints a replay file; --at-write-input=PATH|0,-;9,B writes one (';' = newline, ',' = space)
+     * (the runner can't copy files to the SD). Both before at_init loads --at-input. */
+    for (int i = 1; i < argc; i++) {
+        const int w = strncmp(argv[i], "--at-write-input=", 17) == 0;
+        if (!w && strncmp(argv[i], "--at-dump-input=", 16) != 0) continue;
+        static char buf[4096];
+        snprintf(buf, sizeof buf, "%s", argv[i] + (w ? 17 : 16));
+        char* data = w ? strchr(buf, '|') : nullptr;
+        if (w && !data) continue;
+        if (data) *data++ = 0;
+        FILE* f = fopen(buf, w ? "w" : "r");
+        if (!f) { printf("[atio] cannot open %s\n", buf); continue; }
+        if (w) { for (char* p = data; *p; p++) fputc(*p == ';' ? '\n' : *p == ',' ? ' ' : *p, f); fputc('\n', f); }
+        else { char ln[256]; while (fgets(ln, sizeof ln, f)) printf("[atio] %s", ln); }
+        fclose(f);
+        printf("[atio] %s %s done\n", w ? "wrote" : "dumped", buf);
+    }
+    /* 62a: devkitnx autotest (--at-record / --at-input / --perf ...); sockets and
+     * nxlinkStdio are already up. Its "--" arguments are not an EBOOT path. */
+    at_init(argc, argv, AT_INIT_NO_SOCKETS);
+    /* 67b: --env=KEY=VALUE from nxlink args (devkitnx configs), so a run can set
+     * PAD_SCRIPT & co. without touching env.txt on the SD. */
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--env=", 6) != 0) continue;
+        static char kv[1024];
+        snprintf(kv, sizeof kv, "%s", argv[i] + 6);
+        char* eq = strchr(kv, '=');
+        if (!eq) continue;
+        *eq = 0;
+        setenv(kv, eq + 1, 1);
+        printf("[env] %s=%s (arg)\n", kv, eq + 1);
+    }
     static char* s_nx_argv[] = { (char*)"gow3-nx", (char*)GOW3_NX_EBOOT, nullptr };
-    if (argc < 2) { argc = 2; argv = s_nx_argv; }
+    if (argc < 2 || strncmp(argv[1], "--", 2) == 0) { argc = 2; argv = s_nx_argv; }
     printf("[nx] gow3-nx boot, EBOOT=%s\n", argv[1]);
 #endif
     if (argc < 2) {
@@ -649,6 +724,13 @@ int main(int argc, char** argv)
         } else {
             printf("[patch] Disable Color Grading: off (byte 0x52BDA3=%u)\n", gc);
         }
+        /* 68a/68b: RPCS3 1.00 "Skip intro" (bne 0x1E5468 -> b) and "Skip
+         * videos with X" (0x26FD18 stw r6 -> stw r0=1), both in the lift. */
+        const char* si = getenv("GOW3_SKIP_INTRO");
+        const char* sv = getenv("GOW3_SKIP_VIDEOS");
+        g_gow3_skip_intro  = si ? atoi(si) : 1;
+        g_gow3_skip_videos = sv ? atoi(sv) : 1;
+        printf("[patch] Skip intro: %d, Skip videos with X: %d\n", g_gow3_skip_intro, g_gow3_skip_videos);
     }
 
     derive_vfs_root(argv[1]);

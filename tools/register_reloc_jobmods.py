@@ -10,6 +10,8 @@ sys.path.insert(0, 'ref/ps3recomp/tools')
 from lift_jobmods import module_code_end, elf_load_segments
 
 BASE, FIRST_ID = 0x4000, 300
+# 83a: code_end corta en saltos directos; estos llegan hasta lift_max (codigo llamado por punteros)
+CODE_END_OVERRIDE = {'rjm_434600': 0x119B4, 'rjm_417600': 0x198C4, 'rjm_459100': 0x10D74}
 elf = open('game/EBOOT.ELF', 'rb').read()
 phoff = struct.unpack_from('>Q', elf, 0x20)[0]
 phentsize, phnum = struct.unpack_from('>HH', elf, 0x36)
@@ -32,7 +34,7 @@ for m in man: L.append(f'extern void gow3_{m["name"]}_spu_recomp_register(void);
 L += ['', 'void port_reloc_jobmods_register_all(void)', '{']
 for i, m in enumerate(man):
     raw = open(f'port/spu/reloc/{m["name"]}/raw.bin', 'rb').read()
-    ce = module_code_end(raw, m['name'], BASE)
+    ce = CODE_END_OVERRIDE.get(m['name']) or module_code_end(raw, m['name'], BASE)
     fmax = max(e for _, e in m['funcs']) if m['funcs'] else None
     if not ce: print(m['name'], 'sin code_end, salteado'); continue
     span = ce - BASE

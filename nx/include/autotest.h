@@ -171,8 +171,9 @@ static struct {
     volatile uint64_t in_mask;        /* lo que devuelve at_input: lo publica el hilo del frame */
     volatile int      in_active;
     FILE       *rec;                  /* --at-record */
-    uint64_t    rec_last, rec_mark_btn;
-    int         rec_started, rec_mark_down, exit_at_end;
+    uint64_t    rec_last, rec_mark_btn, rec_stop_btn;
+    int         rec_started, rec_mark_down, rec_stop_down, rec_mark_seen, exit_at_end;
+    volatile int rec_stop_due;        /* --at-record-stop: lo pone el hilo del pad, lo atiende at_frame_end */
     char        rec_mark_name[AT__ZONE_NAME];
     /* --at-clock=vblank: el replay, las marcas y la grabación cuentan ticks del juego
      * (at_vblank) en vez de swaps, así la misma entrada cae en el mismo momento del juego
@@ -400,24 +401,45 @@ int at_input(uint64_t *buttons) {
  * queda como cruceta, el derecho y la posición exacta del stick no quedan.
  * --at-record-mark=BOTON:nombre: apretar BOTON escribe "<frame> @nombre" en vez
  * de grabarse, y no le llega al juego (el replay tampoco lo aprieta).
+ * --at-record-stop=BOTON: apretar BOTON escribe "<frame> END", cierra la grabación y
+ * termina la prueba en el próximo at_frame_end (at_should_quit), así el cierre queda
+ * grabado y el replay con --at-exit-at-end sale en el mismo frame. Si es el mismo botón
+ * que la marca, la primera pulsación es la marca y la siguiente el fin.
  * Devuelve los botones que tiene que ver el juego. Al cerrar escribe "<frame> END". */
 uint64_t at_record(uint64_t buttons) {
     char txt[160];
-    const uint64_t game = buttons & ~at__s.rec_mark_btn;
-    if (!at__s.rec) return buttons;
+    int stop = 0;
+    const uint64_t game = buttons & ~(at__s.rec_mark_btn | at__s.rec_stop_btn);
+    if (!at__s.rec) return game;
     if (buttons & (1u << 16)) buttons |= AT_BTN_LEFT;   /* StickLLeft  */
     if (buttons & (1u << 17)) buttons |= AT_BTN_UP;     /* StickLUp    */
     if (buttons & (1u << 18)) buttons |= AT_BTN_RIGHT;  /* StickLRight */
     if (buttons & (1u << 19)) buttons |= AT_BTN_DOWN;   /* StickLDown  */
     buttons &= 0xFFFFu;
+    if (at__s.rec_stop_btn) {
+        int down = (buttons & at__s.rec_stop_btn) != 0;
+        if (down && !at__s.rec_stop_down &&
+            (at__s.rec_stop_btn != at__s.rec_mark_btn || at__s.rec_mark_seen))
+            stop = 1;
+        at__s.rec_stop_down = down;
+    }
     if (at__s.rec_mark_btn) {
         int down = (buttons & at__s.rec_mark_btn) != 0;
-        if (down && !at__s.rec_mark_down) {
+        if (down && !at__s.rec_mark_down &&
+            (at__s.rec_mark_btn != at__s.rec_stop_btn || !at__s.rec_mark_seen)) {
             fprintf(at__s.rec, "%llu @%s\n", (unsigned long long)at__clock(), at__s.rec_mark_name);
             fflush(at__s.rec);
+            at__s.rec_mark_seen = 1;
         }
         at__s.rec_mark_down = down;
-        buttons &= ~at__s.rec_mark_btn;
+    }
+    buttons &= ~(at__s.rec_mark_btn | at__s.rec_stop_btn);
+    if (stop) {
+        fprintf(at__s.rec, "%llu END\n", (unsigned long long)at__clock());
+        fclose(at__s.rec);
+        at__s.rec = NULL;
+        at__s.rec_stop_due = 1;
+        return game;
     }
     if (at__s.rec_started && buttons == at__s.rec_last) return game;
     at__s.rec_started = 1;
@@ -482,6 +504,8 @@ void at_init(int argc, char **argv, unsigned flags) {
         at__s.rec_mark_btn = at__button(btn);
         at__copy_name(at__s.rec_mark_name, colon ? colon + 1 : "mark");
     }
+    v = at_arg("at-record-stop");          /* BOTON */
+    if (v && *v) at__s.rec_stop_btn = at__button(v);
 
     at__line("[AT] hello v=2 autotest=%d scenario=%s perf=%d", at__s.enabled, at__s.scenario, at__s.perf);
     at_mark("boot");
@@ -633,6 +657,10 @@ void at_frame_end(void) {
     }
     at__s.frame = at__s.frame + 1;   /* volatile: sin ++ (deprecado en C++20) */
     at__input_advance();
+    if (at__s.rec_stop_due && !at__s.done) {
+        at_mark("record_stop");
+        at_done(0);
+    }
     if (at__s.exit_after && at__s.frame >= at__s.exit_after) at_done(0);
 }
 

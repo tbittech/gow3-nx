@@ -1,4 +1,4 @@
-﻿diff --git a/CMakeLists.txt b/CMakeLists.txt
+diff --git a/CMakeLists.txt b/CMakeLists.txt
 index a39405d6..ce711af1 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
@@ -14,7 +14,7 @@ index a39405d6..ce711af1 100644
  endif()
  
 diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
-index b975293d..52559e63 100644
+index b975293d..4cc35604 100644
 --- a/include/ps3emu/ps3_ftrace.h
 +++ b/include/ps3emu/ps3_ftrace.h
 @@ -116,19 +116,22 @@ static inline void ps3_ft_dump(void)
@@ -46,10 +46,20 @@ index b975293d..52559e63 100644
  }
  
 diff --git a/libs/codec/cellVdec.c b/libs/codec/cellVdec.c
-index 7e222c92..8fca86c8 100644
+index 7e222c92..b9b8a9c9 100644
 --- a/libs/codec/cellVdec.c
 +++ b/libs/codec/cellVdec.c
-@@ -45,7 +45,8 @@ static u64 vdec_now_ms(void)
+@@ -30,6 +30,9 @@ static u64 vdec_now_ms(void) { return (u64)GetTickCount64(); }
+ #include <pthread.h>
+ #include <time.h>
+ #include <unistd.h>
++/* l4f 98: vdec events in the 0x4F0 ring (kinds 13..17) */
++extern void ps3_l4f_trace(uint32_t,uint32_t,uint32_t,uint32_t); extern int ps3_l4f_on(void);
++static unsigned s_l4f_gpi_fails;
+ static pthread_mutex_t s_vdec_lock = PTHREAD_MUTEX_INITIALIZER;
+ #define VDEC_LOCK()   pthread_mutex_lock(&s_vdec_lock)
+ #define VDEC_UNLOCK() pthread_mutex_unlock(&s_vdec_lock)
+@@ -45,7 +48,8 @@ static u64 vdec_now_ms(void)
   * Internal state
   * -----------------------------------------------------------------------*/
  #define MAX_VDEC 4
@@ -59,7 +69,7 @@ index 7e222c92..8fca86c8 100644
  #define VDEC_BUSY_AT 16   /* refuse new AUs past this many (EndSeq can add more) */
  #define VDEC_AU_RING 64   /* AUs remembered for pictures that come out late */
  
-@@ -69,6 +70,7 @@ typedef struct {
+@@ -69,6 +73,7 @@ typedef struct {
      u32 auCount;        /* total AUs decoded */
      u16 width;          /* configured resolution (0 = use default) */
      u16 height;
@@ -67,7 +77,7 @@ index 7e222c92..8fca86c8 100644
      /* Decoder path: NULL when there is no libavcodec, and then nothing
       * below is used. */
      VdecFf* ff;
-@@ -125,7 +127,7 @@ static void vdec_queue_clear(VdecSlot* v)
+@@ -125,7 +130,7 @@ static void vdec_queue_clear(VdecSlot* v)
  static void vdec_on_picture(void* ctx, const VdecFfPicture* pic)
  {
      VdecSlot* v = (VdecSlot*)ctx;
@@ -76,7 +86,7 @@ index 7e222c92..8fca86c8 100644
          printf("[cellVdec] picture queue full; dropping the oldest\n");
          free(v->queue[v->qHead].yuv);
          v->qHead = (v->qHead + 1) % VDEC_QUEUE;
-@@ -350,6 +352,11 @@ s32 cellVdecStartSeq(CellVdecHandle handle)
+@@ -350,6 +355,11 @@ s32 cellVdecStartSeq(CellVdecHandle handle)
  
      VDEC_LOCK();
      s_vdec[handle].seqStarted = 1;
@@ -88,7 +98,28 @@ index 7e222c92..8fca86c8 100644
      if (s_vdec[handle].ff) {
          /* A new sequence: nothing from the last one is shown. */
          vdec_ff_reset(s_vdec[handle].ff);
-@@ -451,19 +458,65 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+@@ -425,7 +435,9 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+     if (v->ff) {
+         VDEC_LOCK();
+         if (v->qCount >= VDEC_BUSY_AT) {
++            u32 qb = v->qCount, ab = v->auCount;
+             VDEC_UNLOCK();
++            if (ps3_l4f_on()) ps3_l4f_trace(14, qb, ab, 0); /* l4f VDEC_BUSY */
+             return (s32)CELL_VDEC_ERROR_BUSY;  /* title must take pictures */
+         }
+         v->auCount++;
+@@ -436,7 +448,9 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+                            vdec_on_picture, v);
+         v->lastAuMs = vdec_now_ms();
+         v->idleDrained = 0;
+-        VDEC_UNLOCK();
++        { u32 la = v->auCount, lq = v->qCount, ln = v->newPics;
++          VDEC_UNLOCK();
++          if (ps3_l4f_on()) ps3_l4f_trace(13, la, lq, ln); } /* l4f VDEC_AU */
+         vdec_notify(handle, CELL_VDEC_MSG_TYPE_AUDONE, CELL_OK);
+         vdec_notify_new_pics(handle);
+         return CELL_OK;
+@@ -451,19 +465,67 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
       * picture. Games that only check for completion (not pixel data) will
       * proceed correctly. */
      v->auCount++;
@@ -152,12 +183,29 @@ index 7e222c92..8fca86c8 100644
 +        v->qCount++;
 +    }
      v->hasPic = 1;
-+    VDEC_UNLOCK();
++    { u32 la = v->auCount, lq = v->qCount;
++      VDEC_UNLOCK();
++      if (ps3_l4f_on()) ps3_l4f_trace(13, la, lq, 0xFFFFFFFFu); } /* l4f VDEC_AU (placeholder) */
  
      vdec_notify(handle, CELL_VDEC_MSG_TYPE_PICOUT, CELL_OK);
  
-@@ -569,10 +622,20 @@ s32 cellVdecGetPicItem(CellVdecHandle handle, const CellVdecPicItem** picItem)
-         VDEC_UNLOCK();
+@@ -559,20 +621,38 @@ s32 cellVdecGetPicItem(CellVdecHandle handle, const CellVdecPicItem** picItem)
+     if (v->ff) {
+         VDEC_LOCK();
+         if (!v->qCount) {
++            u32 la = v->auCount, lp = v->picsDecoded;
+             VDEC_UNLOCK();
++            if (ps3_l4f_on() && s_l4f_gpi_fails++ == 0) ps3_l4f_trace(15, la, lp, 0); /* l4f VDEC_GPI_EMPTY */
+             return (s32)CELL_VDEC_ERROR_EMPTY;
+         }
+         const VdecPic* q = &v->queue[v->qHead];
+         vdec_write_item(handle, &q->item);
+         vdec_write_pic_type(handle, q);
+         vm_write32(out, VDEC_ITEM_EA(handle));
+-        VDEC_UNLOCK();
++        { u32 lq = v->qCount, la = v->auCount;
++          VDEC_UNLOCK();
++          if (ps3_l4f_on()) { ps3_l4f_trace(16, s_l4f_gpi_fails, lq, la); s_l4f_gpi_fails = 0; } } /* l4f VDEC_GPI_OK */
          return CELL_OK;
      }
 -    if (!s_vdec[handle].hasPic)
@@ -165,7 +213,9 @@ index 7e222c92..8fca86c8 100644
 +     * left 0 the player's rate is 0). */
 +    VDEC_LOCK();
 +    if (!v->qCount) {
++        u32 la = v->auCount;
 +        VDEC_UNLOCK();
++        if (ps3_l4f_on() && s_l4f_gpi_fails++ == 0) ps3_l4f_trace(15, la, 0xFFFFFFFFu, 0); /* l4f VDEC_GPI_EMPTY */
          return (s32)CELL_VDEC_ERROR_EMPTY;
 -    vdec_write_item(handle, &v->lastPic);
 +    }
@@ -175,12 +225,19 @@ index 7e222c92..8fca86c8 100644
 +        vdec_write_pic_type(handle, q);
 +    }
      vm_write32(out, VDEC_ITEM_EA(handle));
-+    VDEC_UNLOCK();
++    { u32 lq = v->qCount, la = v->auCount;
++      VDEC_UNLOCK();
++      if (ps3_l4f_on()) { ps3_l4f_trace(16, s_l4f_gpi_fails, lq, la); s_l4f_gpi_fails = 0; } } /* l4f VDEC_GPI_OK */
      return CELL_OK;
  }
  
-@@ -620,15 +683,21 @@ s32 cellVdecGetPicture(CellVdecHandle handle, const void* format, void* outBuff)
+@@ -617,18 +697,28 @@ s32 cellVdecGetPicture(CellVdecHandle handle, const void* format, void* outBuff)
+         VDEC_LOCK();
+         s32 rc = vdec_take_picture(v, dst, vm_read32(fmt_ea + 0),
+                                    vm_read32(fmt_ea + 4), vm_read8(fmt_ea + 8));
++        u32 lq = v->qCount;
          VDEC_UNLOCK();
++        if (ps3_l4f_on()) ps3_l4f_trace(17, (u32)rc, lq, dst); /* l4f VDEC_GETPIC */
          return rc;
      }
 -    if (!v->hasPic)
@@ -194,7 +251,9 @@ index 7e222c92..8fca86c8 100644
 +    v->qHead = (v->qHead + 1) % VDEC_QUEUE;
 +    v->qCount--;
 +    v->hasPic = v->qCount != 0;
-+    VDEC_UNLOCK();
++    { u32 lq = v->qCount;
++      VDEC_UNLOCK();
++      if (ps3_l4f_on()) ps3_l4f_trace(17, 0, lq, dst); } /* l4f VDEC_GETPIC (placeholder) */
      if (!dst)
          return CELL_OK;                                /* a skip: consume only */
  
@@ -204,8 +263,116 @@ index 7e222c92..8fca86c8 100644
      u8 row[4096 * 4];
      u32 rowlen;
      switch (type) {
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 5f8a2fa2..1f900920 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -708,6 +708,19 @@ static void pad_poll_sdl2(void)
+         s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
+         s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
+     }
++#ifdef __SWITCH__
++    /* 67a (gow3-nx): SDL opens 4 controllers and the title reads only port 0;
++     * sys-botbase's virtual pad lands on another one. Fold ports 1-3 into 0. */
++    for (int i = 1; i < PAD_MAX_HOST_PORTS; i++) {
++        PadHostState *d = &s_host_state[0], *s = &s_host_state[i];
++        if (!s->connected) continue;
++        d->connected = 1;
++        d->buttons |= s->buttons;
++        u8 *dp = &d->trigger_l2, *sp = &s->trigger_l2;   /* trigger_l2..press_r1: contiguous u8 */
++        for (int k = 0; k <= (int)(&d->press_r1 - &d->trigger_l2); k++) if (sp[k] > dp[k]) dp[k] = sp[k];
++        if (s->analog_lx < 64 || s->analog_lx > 192 || s->analog_ly < 64 || s->analog_ly > 192) { d->analog_lx = s->analog_lx; d->analog_ly = s->analog_ly; }
++    }
++#endif
+ }
+ 
+ static void pad_init_backend(void)
+@@ -776,6 +789,73 @@ static unsigned long long pad_now_ms(void)
+ #endif
+ }
+ 
++#ifdef __SWITCH__
++/* 62a (gow3-nx): devkitnx autotest on player 1. --at-record records the
++ * buttons (and the left stick as the d-pad) in HidNpadButton bits; --at-input
++ * replays them. The mapping is positional (CROSS = bottom = B, CIRCLE = A,
++ * SQUARE = Y, TRIANGLE = X, SELECT = MINUS, START = PLUS). GoW3 moves with the
++ * analog stick and the recording keeps no stick, so on replay the d-pad is fed
++ * as the left stick at full tilt (GOW3_AT_DPAD_AS_STICK=0 keeps it a d-pad):
++ * record without touching the real d-pad. */
++#include "autotest.h"
++static const struct { u16 cell; u32 hid; } s_at_map[] = {
++    { CELL_PAD_CTRL_CROSS, 1u << 1 },  { CELL_PAD_CTRL_CIRCLE, 1u << 0 },
++    { CELL_PAD_CTRL_SQUARE, 1u << 3 }, { CELL_PAD_CTRL_TRIANGLE, 1u << 2 },
++    { CELL_PAD_CTRL_L3, 1u << 4 },     { CELL_PAD_CTRL_R3, 1u << 5 },
++    { CELL_PAD_CTRL_L1, 1u << 6 },     { CELL_PAD_CTRL_R1, 1u << 7 },
++    { CELL_PAD_CTRL_L2, 1u << 8 },     { CELL_PAD_CTRL_R2, 1u << 9 },
++    { CELL_PAD_CTRL_START, 1u << 10 }, { CELL_PAD_CTRL_SELECT, 1u << 11 },
++    { CELL_PAD_CTRL_LEFT, 1u << 12 },  { CELL_PAD_CTRL_UP, 1u << 13 },
++    { CELL_PAD_CTRL_RIGHT, 1u << 14 }, { CELL_PAD_CTRL_DOWN, 1u << 15 },
++};
++#define AT_MAP_N ((int)(sizeof s_at_map / sizeof s_at_map[0]))
++
++static void pad_autotest_p1(PadHostState* hs)
++{
++    static int dpad_as_stick = -1;
++    uint64_t m = 0, scripted;
++    int i;
++    if (dpad_as_stick < 0) {
++        const char* e = getenv("GOW3_AT_DPAD_AS_STICK");
++        dpad_as_stick = (e && *e == '0') ? 0 : 1;
++    }
++    if (at_input(&scripted)) {
++        u16 b = 0;
++        for (i = 0; i < AT_MAP_N; i++) if (scripted & s_at_map[i].hid) b |= s_at_map[i].cell;
++        hs->connected = 1;
++        hs->analog_lx = hs->analog_ly = hs->analog_rx = hs->analog_ry = 128;
++        if (dpad_as_stick) {
++            if (b & CELL_PAD_CTRL_LEFT)  hs->analog_lx = 0;
++            if (b & CELL_PAD_CTRL_RIGHT) hs->analog_lx = 255;
++            if (b & CELL_PAD_CTRL_UP)    hs->analog_ly = 0;
++            if (b & CELL_PAD_CTRL_DOWN)  hs->analog_ly = 255;
++            b &= (u16)~(CELL_PAD_CTRL_LEFT | CELL_PAD_CTRL_RIGHT | CELL_PAD_CTRL_UP | CELL_PAD_CTRL_DOWN);
++        }
++        hs->buttons = b;
++        hs->trigger_l2 = (b & CELL_PAD_CTRL_L2) ? 255 : 0;
++        hs->trigger_r2 = (b & CELL_PAD_CTRL_R2) ? 255 : 0;
++        hs->press_up = hs->press_down = hs->press_left = hs->press_right = 0;
++        hs->press_triangle = (b & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0;
++        hs->press_circle   = (b & CELL_PAD_CTRL_CIRCLE)   ? 255 : 0;
++        hs->press_cross    = (b & CELL_PAD_CTRL_CROSS)    ? 255 : 0;
++        hs->press_square   = (b & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
++        hs->press_l1       = (b & CELL_PAD_CTRL_L1)       ? 255 : 0;
++        hs->press_r1       = (b & CELL_PAD_CTRL_R1)       ? 255 : 0;
++        return;
++    }
++    if (!hs->connected) return;
++    for (i = 0; i < AT_MAP_N; i++) if (hs->buttons & s_at_map[i].cell) m |= s_at_map[i].hid;
++    if (hs->analog_lx < 64)  m |= 1u << 16;   /* StickLLeft  */
++    if (hs->analog_ly < 64)  m |= 1u << 17;   /* StickLUp    */
++    if (hs->analog_lx > 192) m |= 1u << 18;   /* StickLRight */
++    if (hs->analog_ly > 192) m |= 1u << 19;   /* StickLDown  */
++    m = at_record(m);
++    /* The mark button (--at-record-mark) comes back cleared: hide it from the game. */
++    for (i = 0; i < AT_MAP_N; i++)
++        if (!(m & s_at_map[i].hid) && s_at_map[i].hid < (1u << 12)) hs->buttons &= (u16)~s_at_map[i].cell;
++}
++#endif
++
+ static void pad_poll_backend(void)
+ {
+     static unsigned long long s_last_ms = 0;
+@@ -794,6 +874,9 @@ static void pad_poll_backend(void)
+     pad_poll_sdl2();
+ #endif
+     if (!s_host_state[0].connected) pad_poll_keyboard();
++#ifdef __SWITCH__
++    pad_autotest_p1(&s_host_state[0]);
++#endif
+     pad_track_assign();
+     pad_unlock();
+ }
 diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
-index b09220e2..d39b5ce5 100644
+index b09220e2..8a477b83 100644
 --- a/libs/spurs/cellSpurs.c
 +++ b/libs/spurs/cellSpurs.c
 @@ -21,6 +21,7 @@
@@ -216,15 +383,41 @@ index b09220e2..d39b5ce5 100644
  
  /* Bridge the real (BE) taskset EA + selected taskId from CreateTask to the image-22
   * SPU dispatch (spu_workload.c), so spurs_pm_build_context can build the leaf's
-@@ -466,6 +467,7 @@ struct SpursPmSlot {
+@@ -466,6 +467,11 @@ struct SpursPmSlot {
      const uint8_t* pm;
      u64 data;
      HANDLE thread;
 +    u64 t_busy_us;   /* SPU_PROF: when the kernel marked this slot busy */
++    /* 79a: this worker's own wake. si->wake woke every idle worker on each line
++     * commit and dispatch, and each one re-took the exclusive si->lock just to
++     * go back to sleep (15-35 % of every Big worker in "lock 0x5C0C"). */
++    CONDITION_VARIABLE go;
  };
  static struct SpursInst {
      u32 ea, nspus;
-@@ -1491,10 +1493,18 @@ s32 cellSpursCreateTask2(CellSpursTaskset* taskset, u64 id_ea, u64 elf_ea,
+@@ -473,6 +479,7 @@ static struct SpursInst {
+     int kernel_live, stopping, starting;
+     int kick;   /* an SPU committed the request line since the coordinator last looked */
+     SRWLOCK lock;
++    volatile int owner;   /* 80a SPU_PROF: who holds lock (0 free/other, 1 kernel kick pass, 2 kernel full pass, 3 worker, 4 api) */
+     CONDITION_VARIABLE wake;
+     HANDLE coordinator;
+     struct SpursPmSlot slots[6];
+@@ -575,11 +582,13 @@ static s32 spurs_api_lock(u32 ea, struct SpursInst** out)
+         return CELL_SPURS_CORE_ERROR_BUSY;
+     }
+     AcquireSRWLockExclusive(&s_workload_registry_lock);
++    si->owner = 4;
+     *out = si;
+     return CELL_OK;
+ }
+ static void spurs_api_unlock(struct SpursInst* si)
+ {
++    si->owner = 0;
+     ReleaseSRWLockExclusive(&s_workload_registry_lock);
+     WakeAllConditionVariable(&si->wake);
+     ReleaseSRWLockExclusive(&si->lock);
+@@ -1491,10 +1500,18 @@ s32 cellSpursCreateTask2(CellSpursTaskset* taskset, u64 id_ea, u64 elf_ea,
          context_ea    = (u32)vm_read64((u32)attr_ea + TASK2ATTR_EA_CTX);
          ls_pattern_ea = (u32)attr_ea + TASK2ATTR_LS_PAT;
      }
@@ -243,7 +436,7 @@ index b09220e2..d39b5ce5 100644
      return rc;
  }
  
-@@ -1992,17 +2002,24 @@ static DWORD WINAPI spurs_pm_worker(LPVOID p)
+@@ -1992,17 +2009,28 @@ static DWORD WINAPI spurs_pm_worker(LPVOID p)
      { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }
  #endif
      ps3_tprof_thread('S', (uint32_t)slot->spu_num);
@@ -251,9 +444,12 @@ index b09220e2..d39b5ce5 100644
      AcquireSRWLockExclusive(&si->lock);
      for (;;) {
 +        sprof_set(SPROF_IDLE, 0);
++        si->owner = 0;
          while (!slot->busy && !si->stopping)
-             SleepConditionVariableSRW(&si->wake, &si->lock, INFINITE, 0);
+-            SleepConditionVariableSRW(&si->wake, &si->lock, INFINITE, 0);
++            SleepConditionVariableSRW(&slot->go, &si->lock, INFINITE, 0);
          if (si->stopping && !slot->busy) break;
++        si->owner = 0;
          ReleaseSRWLockExclusive(&si->lock);
 +        const uint64_t sp_t1 = sprof_now_us();
 +        sprof_set(SPROF_RUN, (uint32_t)slot->image_id);
@@ -262,13 +458,15 @@ index b09220e2..d39b5ce5 100644
          extern SPU_THREAD_LOCAL volatile unsigned g_spurs_pm_polls;
          unsigned polls = g_spurs_pm_polls;
 +        if (sp_t1) sprof_pm_run(slot->wid, sp_t1 - slot->t_busy_us, sprof_now_us() - sp_t1, polls);
-+        sprof_set(SPROF_LOCK, 0x5C0Cu);   /* place 0x5C0C = si->lock after a run */
++        /* place 0x5C0n = si->lock after a run; n = holder when the wait began (80a) */
++        sprof_set(SPROF_LOCK, 0x5C00u | ((u32)si->owner & 0xFu));
          AcquireSRWLockExclusive(&si->lock);
++        si->owner = 3;
 +        sprof_set(SPROF_DISPATCH, 0);
          u32 wid = slot->wid;
          if (si->active[wid]) si->active[wid]--;
          spu_lockline_lock();
-@@ -2014,6 +2031,7 @@ static DWORD WINAPI spurs_pm_worker(LPVOID p)
+@@ -2014,6 +2042,7 @@ static DWORD WINAPI spurs_pm_worker(LPVOID p)
          WakeAllConditionVariable(&si->wake);
      }
      ReleaseSRWLockExclusive(&si->lock);
@@ -276,7 +474,7 @@ index b09220e2..d39b5ce5 100644
      ps3_tprof_thread_exit();
      return 0;
  }
-@@ -2024,6 +2042,7 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+@@ -2024,6 +2053,7 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
      ps3_thread_name("spurs kernel");
      int disabled = getenv("PS3_NO_SPURS_PM") != NULL;
      unsigned kick_run = 0;
@@ -284,16 +482,18 @@ index b09220e2..d39b5ce5 100644
      AcquireSRWLockExclusive(&si->lock);
      while (!si->stopping) {
          /* A request line committed during the last pass: look again now. Such a
-@@ -2036,6 +2055,7 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+@@ -2036,13 +2066,18 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
          if (__atomic_exchange_n(&si->kick, 0, __ATOMIC_ACQ_REL)) {
              kick_pass = ++kick_run < 16;
          } else {
 +            sprof_set(SPROF_KSLEEP, 0);
++            si->owner = 0;
              SleepConditionVariableSRW(&si->wake, &si->lock, 1, 0);
              /* This full pass reads the line after any commit that woke it. */
              (void)__atomic_exchange_n(&si->kick, 0, __ATOMIC_ACQ_REL);
-@@ -2043,6 +2063,8 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+         }
          if (!kick_pass) kick_run = 0;
++        si->owner = kick_pass ? 1 : 2;
          if (si->stopping) break;
          if (disabled) continue;
 +        sprof_set(SPROF_KSCAN, 0);
@@ -301,16 +501,18 @@ index b09220e2..d39b5ce5 100644
          u32 ea = si->ea;
          AcquireSRWLockExclusive(&s_workload_registry_lock);
          if (!kick_pass) si->pass_no++;
-@@ -2092,6 +2114,8 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+@@ -2092,14 +2127,17 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
                  spu_lockline_lock();
                  wkl_count_set(ea, SPURS_WKL_CURCONT, wid, si->is2, si->active[wid]);
                  ef_line_end(ea);
 +                slot->t_busy_us = sprof_now_us();
 +                sprof_kernel_dispatch(kicked);
                  slot->busy = 1;
-                 WakeAllConditionVariable(&si->wake);
+-                WakeAllConditionVariable(&si->wake);
++                WakeConditionVariable(&slot->go);
                  break;
-@@ -2100,6 +2124,7 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+             }
+         }
          ReleaseSRWLockExclusive(&s_workload_registry_lock);
      }
      ReleaseSRWLockExclusive(&si->lock);
@@ -318,14 +520,36 @@ index b09220e2..d39b5ce5 100644
      return 0;
  }
  
+@@ -2124,6 +2162,7 @@ static s32 spurs_scheduler_start(struct SpursInst* si)
+ failed:
+     AcquireSRWLockExclusive(&si->lock);
+     si->stopping = 1; WakeAllConditionVariable(&si->wake);
++    for (u32 sn = 0; sn < si->nspus; sn++) WakeAllConditionVariable(&si->slots[sn].go);
+     ReleaseSRWLockExclusive(&si->lock);
+     for (u32 sn = 0; sn < si->nspus; sn++) {
+         HANDLE h = si->slots[sn].thread;
+@@ -2143,6 +2182,7 @@ static s32 spurs_scheduler_stop(struct SpursInst* si, u32 ea)
+     for (u32 wid = 0; wid < SPURS_MAX_WID; wid++)
+         if (si->active[wid]) { ReleaseSRWLockExclusive(&si->lock); return CELL_SPURS_CORE_ERROR_BUSY; }
+     si->stopping = 1; WakeAllConditionVariable(&si->wake);
++    for (u32 sn = 0; sn < si->nspus; sn++) WakeAllConditionVariable(&si->slots[sn].go);
+     ReleaseSRWLockExclusive(&si->lock);
+     if (si->coordinator) { WaitForSingleObject(si->coordinator, INFINITE); CloseHandle(si->coordinator); si->coordinator = NULL; }
+     for (u32 sn = 0; sn < si->nspus; sn++) {
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index f073f327..1d7837e2 100644
+index f073f327..b91f3c05 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
-@@ -2166,6 +2166,145 @@ static void wprof_note_walker(void)
+@@ -1,3 +1,4 @@
++#include "l4f_trace.h" /* l4f */
+ /*
+  * ps3recomp - cellGcmSys HLE module implementation
+  *
+@@ -2166,8 +2167,164 @@ static void wprof_note_walker(void)
      }
      pthread_detach(t);
  }
++void ps3_wprof_note_main(void) {}
 +#elif defined(__SWITCH__)
 +/* 57a: Switch version of the walker profiler. RSX_WALKER_PROF="<start_s>:<seconds>"
 + * (e.g. "160:12"). The first thread to drain the FIFO is the one sampled:
@@ -441,13 +665,13 @@ index f073f327..1d7837e2 100644
 +    atomic_store(&s_wprof_state, 2);
 +    return NULL;
 +}
-+static void wprof_note_walker(void)
++static void wprof_arm(const char* env_name)
 +{
 +    if (atomic_load_explicit(&s_wprof_state, memory_order_relaxed) != 0) return;
 +    /* One caller arms it; that thread is the one sampled. */
 +    int unset = 0;
 +    if (!atomic_compare_exchange_strong(&s_wprof_state, &unset, 1)) return;
-+    const char* e = getenv("RSX_WALKER_PROF");
++    const char* e = getenv(env_name);
 +    if (!e || !*e) { atomic_store(&s_wprof_state, 2); return; }
 +    int start_s = 0, secs = 0;
 +    if (sscanf(e, "%d:%d", &start_s, &secs) < 1) { atomic_store(&s_wprof_state, 2); return; }
@@ -465,10 +689,28 @@ index f073f327..1d7837e2 100644
 +    pthread_detach(t);
 +    fprintf(stderr, "[wprof] armed: start %d s, %d s, handle 0x%X\n", start_s, secs, s_wprof_handle);
 +}
++/* l4f/wprof: PPU_MAIN_PROF samples the main guest PPU thread instead of the walker. */
++static void wprof_note_walker(void)
++{
++    const char* e = getenv("PPU_MAIN_PROF");
++    if (e && *e) return;
++    wprof_arm("RSX_WALKER_PROF");
++}
++void ps3_wprof_note_main(void)
++{
++    static int off = 0;
++    if (off || atomic_load_explicit(&s_wprof_state, memory_order_relaxed) != 0) return;
++    const char* e = getenv("PPU_MAIN_PROF");
++    if (e && *e) { fprintf(stderr, "[wprof] target=PPU_MAIN_PROF %s\n", e); wprof_arm("PPU_MAIN_PROF"); return; }
++    off = 1;
++}
  #else
  static void wprof_note_walker(void) {}
++void ps3_wprof_note_main(void) {}
  #endif
-@@ -2180,6 +2319,15 @@ void cellGcm_rsx_process_fifo(void)
+ 
+ /* Host thread that last walked the FIFO, for PS3_SAMPLE_DRAIN. */
+@@ -2180,6 +2337,15 @@ void cellGcm_rsx_process_fifo(void)
      const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
      AcquireSRWLockExclusive(&s_gcm_fifo_lock);
      gcm_rsx_process_fifo_unlocked();
@@ -484,11 +726,214 @@ index f073f327..1d7837e2 100644
      ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
      if (ft_t0) {
          const uint64_t t1 = ps3_ft_now();
+@@ -2717,6 +2883,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
+             }
+             if (subch == 0 && (method == 0x64u || method == 0x68u || method == 0x6Cu)) {
+                 int sem_blocked = 0;
++                static unsigned long long l4f_t0; extern unsigned long long ps3_ms_now(void); /* l4f */
++                /* GCM_SEMA_ACQUIRE_MS: start of the acquire being waited on. Cleared when
++                 * it is satisfied too (101c): left set, the next block on the same
++                 * offset/value counted from an OLD wait and gave up at once. */
++                static unsigned long long b_t0;
+                 for (u32 i = 0; i < count; i++) {
+                     u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
+                     if (!dea) break;
+@@ -2726,7 +2897,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                     { static int sn = 0, recdbg = -1; if (recdbg < 0) recdbg = getenv("GCM_RECDBG") ? 1 : 0;
+                       if (recdbg && PS3_LOG_FIRST(sn, 12))
+                         fprintf(stderr, "[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
++                    if (m == 0x68u && l4f_t0 && vm_read32(la) == v && (s_sema_offset & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) { ps3_l4f_trace(SEM_ACQ_PASS, v, (uint32_t)(ps3_ms_now() - l4f_t0), s_fifo_getoff); l4f_t0 = 0; } /* l4f */
+                     /* PS3_FTRACE: an acquire this walker sat on is satisfied now. */
++                    if (m == 0x68u && vm_read32(la) == v) b_t0 = 0;   /* 101c */
+                     if (m == 0x68u && s_ft_sema_t0 && vm_read32(la) == v) {
+                         ps3_ft_span(PS3_FT_SEMA, 0, s_sema_offset, v, s_ft_sema_t0, ps3_ft_now());
+                         s_ft_sema_t0 = 0;
+@@ -2742,6 +2915,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                          * its own `put` equals it, which a snapshot from
+                          * before the RELEASE never does. GCM_GET_EQ_PUT keeps
+                          * publishing put at the end of the pass instead. */
++                        if ((s_sema_offset & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) ps3_l4f_trace(SEM_REL_6C, v, s_fifo_getoff, 0); /* l4f */
+                         if (!gcm_get_eq_put())
+                             vm_write32(GCM_CONTROL_GUEST_ADDR + 4, s_fifo_getoff + 4 + count * 4);
+                         atomic_thread_fence(memory_order_release);
+@@ -2764,10 +2938,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                  * <ms> on the same acquire it is consumed and said so. inFAMOUS 2
+                  * acquires a label its SPU lighting writes each frame: waiting
+                  * here is what orders the RSX's sampling after that write. */
+-                static u32 b_off, b_val; static unsigned long long b_t0;
++                static u32 b_off, b_val;
+                 extern unsigned long long ps3_ms_now(void);
+                 const unsigned long long now = ps3_ms_now();
+-                if (!b_t0 || b_off != s_sema_offset || b_val != v) { b_off = s_sema_offset; b_val = v; b_t0 = now; }
++                if (!b_t0 || b_off != s_sema_offset || b_val != v) { b_off = s_sema_offset; b_val = v; b_t0 = now;
++                    if ((s_sema_offset & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) { ps3_l4f_trace(SEM_ACQ_BLOCK, v, vm_read32(la), s_fifo_getoff); l4f_t0 = now; } } /* l4f */
+                 if (!blk_ms || now - b_t0 < blk_ms) {
+                     if (PS3_FT_ON() && !s_ft_sema_t0) s_ft_sema_t0 = ps3_ft_now();
+                     sem_blocked = 1; break;
+@@ -2776,6 +2951,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                     fprintf(stderr, "[SEMA] acquire off=0x%X == 0x%08X gave up after %u ms (label 0x%08X)\n",
+                             s_sema_offset, v, blk_ms, vm_read32(la)); }
+                 b_t0 = 0;
++                if ((s_sema_offset & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) { ps3_l4f_dump("acquire 0x4F0 gave up"); l4f_t0 = 0; } /* l4f */
+             }
+         }
+                 }
+@@ -3387,8 +3563,25 @@ u32 cellGcm_display_buffer_count(void)
+     return n;
+ }
+ 
++#ifdef __SWITCH__
++#include "autotest.h"
++#endif
++
+ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+ {
++#ifdef __SWITCH__
++    /* 62a (gow3-nx): one devkitnx frame per guest flip -- the replay and the
++     * marks count flips. at_done (--at-exit-at-end / --at-exit-after) ends the
++     * process here: the same as HOME -> close, the title goes away. */
++    at_frame_end();
++    if (at_should_quit()) {
++        fprintf(stderr, "[AT] quit at flip\n");
++        at_shutdown();
++        fflush(stdout); fflush(stderr);
++        exit(0);
++    }
++    at_frame_begin();
++#endif
+     /* GCM_FLIPCOUNT=1: every flip, with a timestamp. FLIP_DBG caps at 20 lines,
+      * which answers "did it ever flip?" and not "is it still flipping, and how
+      * fast?" -- the question that matters when a title stops appearing on
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index a39639f1..cbb17f3b 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -1,3 +1,4 @@
++#include "l4f_trace.h" /* l4f */
+ /*
+  * ps3recomp - RSX Command Buffer Processor
+  *
+@@ -529,6 +530,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         u32 ea = gcm_io_offset_to_ea(s_sem_off);
+         u32 val = method == 0x1D74 ? data
+                 : (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
++        if ((s_sem_off & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) ps3_l4f_trace(method == 0x1D74 ? RSX_REL_1D74 : RSX_REL_1D70, val, g_rsx_last_reference, 0); /* l4f */
+         if (ea) vm_write32(ea, val);
+         return 0;
+       }
+@@ -542,6 +544,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+          * 0x00010000 != 1 and spun forever (gcm/cube sample hang after init).
+          * Apply the same swap the hardware does so the pre-swap cancels out. */
+         u32 val = (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
++        if ((s_sem_off & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) ps3_l4f_trace(RSX_REL_1D70, val, g_rsx_last_reference, 0); /* l4f */
+         vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), val);
+         { static u32 seen[64]; static int ns = 0; int k = 0;   /* TEMP: distinct release offsets */
+           for (; k < ns; k++) if (seen[k] == s_sem_off) break;
+@@ -552,6 +555,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+       }
+       if (method == 0x1D74) {
+         extern void vm_write32(uint32_t a, uint32_t v);
++        if ((s_sem_off & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) ps3_l4f_trace(RSX_REL_1D74, data, g_rsx_last_reference, 0); /* l4f */
+         vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), data);
+         return 0;
+       } }
+@@ -963,6 +967,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+      * the spin. Class 0 (software) method, no subchannel state needed here. */
+     if (method == 0x0050) {
+         g_rsx_last_reference = data;
++        if (ps3_l4f_on()) ps3_l4f_trace(SET_REF, data, 0, 0); /* l4f */
+         return 0;
+     }
+ 
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 19548e0a..4fc812e1 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -1218,7 +1218,7 @@ static u32 eng_zdepth_as_color(u32 slot, const rsx_dsp_texture* t)
+         const u32 tex = g.be->depth_as_color(g.be->user, z->handle, t->width, t->height,
+                                              base_fmt);
+         if (!tex) return 0;
+-        if (z->conv) g.be->texture_release(g.be->user, z->conv);
++        if (z->conv && z->conv != tex) g.be->texture_release(g.be->user, z->conv);
+         z->conv = tex;
+         z->conv_w = t->width; z->conv_h = t->height; z->conv_fmt = base_fmt;
+         z->conv_serial = z->depth_serial;
+@@ -2780,6 +2780,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+             }
+             const u32 conv = eng_zdepth_as_color((u32)zsrc, &t);
+             if (conv) { textures[u] = conv; continue; }
++            { static u32 logs = 0; if (PS3_LOG_FIRST(logs, 16)) { const eng_zdepth* zz = &g.zdepths[zsrc]; fprintf(stderr, "[rbk] depth->guest zfmt %u tfmt 0x%X pitch %u/%u tex %ux%u used %ux%u mips %u cube %d dim %u\n", zz->zfmt, t.format, t.pitch, zz->pitch, t.width, t.height, zz->used_w, zz->used_h, t.mipmaps, (int)t.cubemap, t.dimension); } }
+             if (eng_zdepth_to_guest((u32)zsrc)) {
+                 textures[u] = eng_texture_slot(t.location, t.offset, t.format,
+                                                t.width, t.height, t.mipmaps, t.pitch,
+@@ -2798,6 +2799,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+             while (k < n_targets && target_slots[k] != (u32)surface_at) k++;
+             if (k == n_targets) return eng_color_feedback_failure(u, s, &t);
+             if (!feedback[k]) {
++                { static u32 logs = 0; if (PS3_LOG_FIRST(logs, 16)) fprintf(stderr, "[rbk] color snapshot surf %d tfmt 0x%X tex %ux%u pitch %u\n", surface_at, t.format, t.width, t.height, t.pitch); }
+                 const u32 copy = g.be->color_snapshot(g.be->user, s->handle);
+                 if (!copy) return eng_color_feedback_failure(u, s, &t);
+                 if (s->feedback) g.be->texture_release(g.be->user, s->feedback);
+@@ -2818,6 +2820,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+             g.surfaces[sampled].fmt == RSX_BE_FMT_R8G8B8A8 &&
+             eng_format_reinterprets_rgba8(base_fmt) &&
+             eng_surface_to_guest((u32)sampled)) {
++            { static u32 logs = 0; if (PS3_LOG_FIRST(logs, 16)) fprintf(stderr, "[rbk] surface->guest surf %d tfmt 0x%X base 0x%X tex %ux%u pitch %u\n", sampled, t.format, base_fmt, t.width, t.height, t.pitch); }
+             textures[u] = eng_texture_slot(t.location, t.offset, t.format,
+                                            t.width, t.height, t.mipmaps, t.pitch,
+                                            (int)t.cubemap, t.remap & 0xFFFFu,
+diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
+index 4aa4a176..f8315ec7 100644
+--- a/libs/video/rsx_shader_spirv.cpp
++++ b/libs/video/rsx_shader_spirv.cpp
+@@ -70,8 +70,9 @@ int translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv,
+         return -1;
+     }
+ 
+-    const EShLanguage lang = (stage == RSX_SHADER_STAGE_VERTEX) ? EShLangVertex
+-                                                                : EShLangFragment;
++    const EShLanguage lang = (stage == RSX_SHADER_STAGE_VERTEX) ? EShLangVertex :
++                             (stage == RSX_SHADER_STAGE_COMPUTE) ? EShLangCompute :
++                                                                    EShLangFragment;
+     const EShMessages msgs =
+         (EShMessages)(EShMsgSpvRules | EShMsgVulkanRules | EShMsgReadHlsl);
+ 
+@@ -237,7 +238,8 @@ extern "C" int rsx_hlsl_to_spirv(const char* hlsl, int stage,
+         put_log(log, log_size, "bad arguments", nullptr);
+         return -1;
+     }
+-    if (stage != RSX_SHADER_STAGE_VERTEX && stage != RSX_SHADER_STAGE_FRAGMENT) {
++    if (stage != RSX_SHADER_STAGE_VERTEX && stage != RSX_SHADER_STAGE_FRAGMENT &&
++        stage != RSX_SHADER_STAGE_COMPUTE) {
+         put_log(log, log_size, "unknown shader stage", nullptr);
+         return -1;
+     }
+diff --git a/libs/video/rsx_shader_spirv.h b/libs/video/rsx_shader_spirv.h
+index b9f67f57..e78babd7 100644
+--- a/libs/video/rsx_shader_spirv.h
++++ b/libs/video/rsx_shader_spirv.h
+@@ -32,6 +32,7 @@
+ 
+ #include "ps3emu/ps3types.h"
+ #include "rsx_shader_msl.h"   /* RSX_SHADER_STAGE_VERTEX / _FRAGMENT */
++#define RSX_SHADER_STAGE_COMPUTE 2
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -48,7 +49,7 @@ int rsx_hlsl_to_spirv_available(void);
+ /* Translate one HLSL shader whose entry point is `main` into SPIR-V 1.0 for a
+  * Vulkan 1.0 client.
+  *   hlsl      : NUL-terminated HLSL, as the decompilers emit it.
+- *   stage     : RSX_SHADER_STAGE_VERTEX or RSX_SHADER_STAGE_FRAGMENT.
++ *   stage     : RSX_SHADER_STAGE_VERTEX, _FRAGMENT, or _COMPUTE.
+  *   words     : receives the SPIR-V, max_words 32-bit words at most.
+  *   out_words : receives the word count.
+  *   log       : receives a diagnostic on failure (may be NULL).
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78c66f2..5b9f5f9c 100644
+index f78c66f2..9b96a760 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
-@@ -58,6 +58,21 @@
+@@ -58,10 +58,26 @@
  #include <SDL2/SDL.h>
  #include <SDL2/SDL_vulkan.h>
  
@@ -510,7 +955,29 @@ index f78c66f2..5b9f5f9c 100644
  #include <dlfcn.h>
  #include <pthread.h>
  #include <stddef.h>
-@@ -252,6 +267,9 @@ static vk_state s_vk;
+ #include <stdint.h>
++#include <time.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -92,13 +108,14 @@
+     X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) \
+     X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkResetDescriptorPool) \
+     X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) \
+-    X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) \
++    X(vkCreateGraphicsPipelines) X(vkCreateComputePipelines) X(vkCreatePipelineCache) X(vkDestroyPipelineCache) \
++    X(vkGetPipelineCacheData) X(vkDestroyPipeline) \
+     X(vkCreateSampler) X(vkDestroySampler) \
+     X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) \
+     X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyImage) \
+     X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdBindPipeline) \
+     X(vkCmdBindVertexBuffers) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) \
+-    X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) \
++    X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) X(vkCmdDispatch) \
+     X(vkCmdSetStencilReference) X(vkCmdSetDepthBounds) \
+     X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) \
+     X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCmdBlitImage)
+@@ -252,6 +269,9 @@ static vk_state s_vk;
   * -------------------------------------------------------------------------*/
  static int vk_load_library(void)
  {
@@ -520,7 +987,7 @@ index f78c66f2..5b9f5f9c 100644
      static const char* names[] = { "libvulkan.so.1", "libvulkan.so" };
      for (size_t i = 0; i < sizeof names / sizeof names[0] && !s_vk.lib; i++)
          s_vk.lib = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
-@@ -262,6 +280,7 @@ static int vk_load_library(void)
+@@ -262,6 +282,7 @@ static int vk_load_library(void)
      pvkGetInstanceProcAddr =
          (PFN_vkGetInstanceProcAddr)dlsym(s_vk.lib, "vkGetInstanceProcAddr");
      if (!pvkGetInstanceProcAddr) { VK_LOG("libvulkan has no vkGetInstanceProcAddr\n"); return -1; }
@@ -528,7 +995,267 @@ index f78c66f2..5b9f5f9c 100644
  #define LOAD_G(name) \
      if (!(p##name = (PFN_##name)pvkGetInstanceProcAddr(VK_NULL_HANDLE, #name))) \
          { VK_LOG("missing global function " #name "\n"); return -1; }
-@@ -1745,6 +1764,18 @@ static void vk_window_drop(const char* why)
+@@ -454,6 +475,9 @@ static void vk_present_wait_gpu(void);
+  * all earlier work has completed. */
+ static u32 s_eb_pending;
+ static void vk_eng_flush(void);
++static void vk_eng_drain(void);      /* 68c: flush + wait for every async segment */
++static void vk_eb_all_complete(void);
++static int vk_eb_any_pending(void);
+ static int vk_eb_active(void);       /* batching decided on and on */
+ static u32 vk_eb_max(void);
+ static void vk_eb_recorded(void);   /* one more command in the open batch */
+@@ -463,7 +487,7 @@ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src,
+ 
+ static void vk_destroy_image(vk_image* im)
+ {
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_drain();
+     /* Never under a present's copy that may still read it. */
+     if (im->img) vk_present_wait_gpu();
+     if (im->view) pvkDestroyImageView(s_vk.device, im->view, NULL);
+@@ -526,7 +550,7 @@ static int vk_create_device_buffer(vk_buffer* b, VkDeviceSize size, VkBufferUsag
+ 
+ static void vk_destroy_buffer(vk_buffer* b)
+ {
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_drain();
+     if (b->ptr) pvkUnmapMemory(s_vk.device, b->mem);
+     if (b->buf) pvkDestroyBuffer(s_vk.device, b->buf, NULL);
+     if (b->mem) pvkFreeMemory(s_vk.device, b->mem, NULL);
+@@ -572,6 +596,7 @@ static void vk_device_idle(void)
+     pthread_mutex_lock(&s_vk.queue_mu);
+     pvkDeviceWaitIdle(s_vk.device);
+     pthread_mutex_unlock(&s_vk.queue_mu);
++    vk_eb_all_complete();
+ }
+ 
+ /* A full execution and memory dependency on everything submitted before
+@@ -595,21 +620,191 @@ static int vk_begin(void)
+     /* A present's copy may still be reading the surface this frame is about
+      * to draw over: order everything here after it. Set only by a present,
+      * which never runs alongside the walker's recording. */
+-    if (s_vk.present_order) { vk_cmd_after_everything(s_vk.cmd); s_vk.present_order = 0; }
++    /* 68c: async batch segments may still run: order this buffer after them. */
++    if (s_vk.present_order || vk_eb_any_pending()) { vk_cmd_after_everything(s_vk.cmd); s_vk.present_order = 0; }
+     return 0;
+ }
+ 
+-static int vk_submit_and_wait(void)
++/* 65a: [saw] calls/submit/wait per 256 submit_and_wait (time.h for clock_gettime) */
++static uint64_t vk_saw_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
++static VkPipelineCache s_pcache;
++static char s_pcache_path[256];
++static uint32_t s_pcache_dirty;
++static uint64_t s_pcache_saved_ns;
++static size_t s_pcache_saved_size;  /* 93: size on disk; an unchanged size is not rewritten */
++
++static void vk_pcache_open(void)
++{
++    const char* path = getenv("PS3RECOMP_VK_PIPECACHE");
++    if (!path || !*path) return;
++    snprintf(s_pcache_path, sizeof(s_pcache_path), "%s", path);
++
++    void* data = NULL;
++    size_t size = 0;
++    FILE* f = fopen(s_pcache_path, "rb");
++    if (f) {
++        if (fseek(f, 0, SEEK_END) == 0) {
++            long end = ftell(f);
++            if (end >= 0 && end <= 64 * 1024 * 1024 &&
++                fseek(f, 0, SEEK_SET) == 0) {
++                size = (size_t)end;
++                if (size) {
++                    data = malloc(size);
++                    if (!data || fread(data, 1, size, f) != size) {
++                        free(data);
++                        data = NULL;
++                        size = 0;
++                    }
++                }
++            }
++        }
++        fclose(f);
++    }
++
++    size_t loaded = size;
++    VkPipelineCacheCreateInfo ci = {
++        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
++        .initialDataSize = size, .pInitialData = data
++    };
++    VkResult r = pvkCreatePipelineCache(s_vk.device, &ci, NULL, &s_pcache);
++    if (r != VK_SUCCESS) {
++        ci.initialDataSize = 0;
++        ci.pInitialData = NULL;
++        loaded = 0;
++        pvkCreatePipelineCache(s_vk.device, &ci, NULL, &s_pcache);
++    }
++    free(data);
++    s_pcache_saved_size = loaded;
++    VK_LOG("[pcache] loaded %zu bytes from %s (%s)\n", loaded, s_pcache_path,
++           loaded ? "ok" : "empty");
++}
++
++static void vk_pcache_save(int force)
++{
++    if (!s_pcache || !s_pcache_dirty) return;
++    uint64_t now = vk_saw_ns();
++    if (!force && now - s_pcache_saved_ns < 10000000000ull) return;
++    s_pcache_saved_ns = now;
++
++    size_t n = 0;
++    if (pvkGetPipelineCacheData(s_vk.device, s_pcache, &n, NULL) != VK_SUCCESS)
++        return;
++    if (!force && n == s_pcache_saved_size) { s_pcache_dirty = 0; return; }
++    void* data = malloc(n);
++    if (!data) return;
++    if (pvkGetPipelineCacheData(s_vk.device, s_pcache, &n, data) != VK_SUCCESS) {
++        free(data);
++        return;
++    }
++
++    char tmp[sizeof(s_pcache_path) + 4];
++    int len = snprintf(tmp, sizeof(tmp), "%s.tmp", s_pcache_path);
++    if (len < 0 || (size_t)len >= sizeof(tmp)) {
++        free(data);
++        return;
++    }
++    FILE* f = fopen(tmp, "wb");
++    int ok = f && fwrite(data, 1, n, f) == n;
++    if (f && fclose(f) != 0) ok = 0;
++    free(data);
++    if (ok) {
++        remove(s_pcache_path);
++        if (rename(tmp, s_pcache_path) == 0) {
++            s_pcache_dirty = 0;
++            s_pcache_saved_size = n;
++            double ms = (double)(vk_saw_ns() - now) / 1000000.0;
++            VK_LOG("[pcache] saved %zu bytes (%.1f ms)\n", n, ms);
++            return;
++        }
++    }
++    s_pcache_saved_ns = vk_saw_ns();
++}
++
++static uint64_t s_saw_n, s_saw_sub, s_saw_wait;
++static struct { int line; uint32_t n; uint64_t ns; } s_rbk_sync[48];
++static uint32_t s_rbk_nsync;
++static uint32_t s_rbk_pipe_n; static uint64_t s_rbk_pipe_ns; static uint64_t s_rbk_t0;
++
++static void vk_rbk_note(int line, uint64_t ns)
++{
++    for (uint32_t i = 0; i < s_rbk_nsync; i++) {
++        if (s_rbk_sync[i].line == line) {
++            s_rbk_sync[i].n++;
++            s_rbk_sync[i].ns += ns;
++            return;
++        }
++    }
++    if (s_rbk_nsync < 48) {
++        s_rbk_sync[s_rbk_nsync].line = line;
++        s_rbk_sync[s_rbk_nsync].n = 1;
++        s_rbk_sync[s_rbk_nsync].ns = ns;
++        s_rbk_nsync++;
++    }
++}
++
++static void vk_rbk_report(void)
++{
++    if (s_rbk_t0 == 0) {
++        s_rbk_t0 = vk_saw_ns();
++        return;
++    }
++    const uint64_t now = vk_saw_ns();
++    if (now - s_rbk_t0 < 30000000000ull) return;
++    uint32_t sync_n = 0;
++    uint64_t sync_ns = 0;
++    for (uint32_t i = 0; i < s_rbk_nsync; i++) {
++        sync_n += s_rbk_sync[i].n;
++        sync_ns += s_rbk_sync[i].ns;
++    }
++    VK_LOG("[rbk] %.1f s: sync %u calls %.1f ms | pipelines %u created %.1f ms\n",
++           (now - s_rbk_t0) / 1e9, sync_n, sync_ns / 1e6, s_rbk_pipe_n, s_rbk_pipe_ns / 1e6);
++    for (uint32_t rank = 0, used[48] = { 0 }; rank < 10; rank++) {
++        int best = -1;
++        for (uint32_t i = 0; i < s_rbk_nsync; i++) {
++            if (!used[i] && (best < 0 || s_rbk_sync[i].ns > s_rbk_sync[(uint32_t)best].ns)) best = (int)i;
++        }
++        if (best < 0) break;
++        used[best] = 1;
++        VK_LOG("[rbk]   sync line %d: %u calls %.1f ms\n",
++               s_rbk_sync[best].line, s_rbk_sync[best].n, s_rbk_sync[best].ns / 1e6);
++    }
++    for (uint32_t i = 0; i < s_rbk_nsync; i++) {
++        s_rbk_sync[i].line = 0;
++        s_rbk_sync[i].n = 0;
++        s_rbk_sync[i].ns = 0;
++    }
++    s_rbk_nsync = 0;
++    s_rbk_pipe_n = 0;
++    s_rbk_pipe_ns = 0;
++    s_rbk_t0 = vk_saw_ns();
++}
++
++
++static int vk_submit_and_wait_at(int line)
+ {
++    const uint64_t tr0 = vk_saw_ns();
+     VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
+     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                         .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
+     VK_CHECK(pvkResetFences(s_vk.device, 1, &s_vk.fence), "vkResetFences");
++    const uint64_t t0 = vk_saw_ns();
+     VK_CHECK(vk_queue_submit(&si, s_vk.fence), "vkQueueSubmit");
++    const uint64_t t1 = vk_saw_ns();
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_vk.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
++    s_saw_sub += t1 - t0; s_saw_wait += vk_saw_ns() - t1;
++    vk_eb_all_complete();       /* 68c: this fence covers every earlier submission */
++    if ((++s_saw_n & 255u) == 0) {
++        VK_LOG("[saw] 256 calls: submit %.1f ms wait %.1f ms (total calls %llu)\n",
++               s_saw_sub / 1e6, s_saw_wait / 1e6, (unsigned long long)s_saw_n);
++        s_saw_sub = s_saw_wait = 0;
++    }
++    vk_rbk_note(line, vk_saw_ns() - tr0);
++    vk_rbk_report();
+     return 0;
+ }
+ 
++#define vk_submit_and_wait() vk_submit_and_wait_at(__LINE__)
++
+ /* Order this command buffer's use of an image after everything submitted
+  * before it; from UNDEFINED it is also the one-time move to GENERAL. */
+ static void vk_barrier_image_on(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect,
+@@ -1034,7 +1229,9 @@ static VkPipeline vk_get_pipeline(int ztest, int zwrite, u32 cmp)
+         .pDynamicState = &dy, .layout = s_vk.pipe_layout, .renderPass = s_vk.render_pass,
+         .subpass = 0 };
+     VkPipeline p = VK_NULL_HANDLE;
+-    VkResult r = pvkCreateGraphicsPipelines(s_vk.device, VK_NULL_HANDLE, 1, &gci, NULL, &p);
++    const uint64_t tp0 = vk_saw_ns();
++    VkResult r = pvkCreateGraphicsPipelines(s_vk.device, s_pcache, 1, &gci, NULL, &p);
++    s_rbk_pipe_n++; s_rbk_pipe_ns += vk_saw_ns() - tp0; s_pcache_dirty++;
+     if (r != VK_SUCCESS) { VK_LOG("vkCreateGraphicsPipelines failed (%d)\n", (int)r); return VK_NULL_HANDLE; }
+     s_vk.pipelines[slot] = p;
+     return p;
+@@ -1375,7 +1572,9 @@ static VkPipeline vk_guest_pipeline(int vs, int fs, int ztest, int zwrite, u32 c
+         .pDynamicState = &dy, .layout = s_g.pipe_layout, .renderPass = s_vk.render_pass,
+         .subpass = 0 };
+     VkPipeline p = VK_NULL_HANDLE;
+-    VkResult r = pvkCreateGraphicsPipelines(s_vk.device, VK_NULL_HANDLE, 1, &gci, NULL, &p);
++    const uint64_t tp0 = vk_saw_ns();
++    VkResult r = pvkCreateGraphicsPipelines(s_vk.device, s_pcache, 1, &gci, NULL, &p);
++    s_rbk_pipe_n++; s_rbk_pipe_ns += vk_saw_ns() - tp0; s_pcache_dirty++;
+     if (r != VK_SUCCESS) {
+         VK_LOG("guest pipeline: vkCreateGraphicsPipelines failed (%d)\n", (int)r);
+         return VK_NULL_HANDLE;
+@@ -1471,6 +1670,7 @@ static int vk_guest_init(void)
+ static void vk_guest_shutdown(void)
+ {
+     if (s_vk.device) {
++        vk_eng_drain();
+         for (u32 i = 0; i < s_g.pipe_count; i++)
+             if (s_g.pipes[i].pipe) pvkDestroyPipeline(s_vk.device, s_g.pipes[i].pipe, NULL);
+         for (u32 i = 0; i < s_g.vp_count; i++)
+@@ -1745,6 +1945,18 @@ static void vk_window_drop(const char* why)
  
  static void vk_window_open(const char* title)
  {
@@ -547,7 +1274,654 @@ index f78c66f2..5b9f5f9c 100644
      if (!vk_env_on("PS3RECOMP_VK_WINDOW")) return;
      if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
          VK_LOG("window disabled, continuing headless: SDL video init failed: %s\n", SDL_GetError());
-@@ -4225,4 +4256,19 @@ int rsx_vulkan_backend_depth_bounds(void)
+@@ -1945,6 +2157,7 @@ static void vk_present_window(void)
+     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+     if (pvkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) { VK_LOG("vkBeginCommandBuffer (window) failed\n"); return; }
++    vk_cmd_after_everything(cb);    /* 68c: after async batch segments */
+     vk_barrier_image_on(cb, s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+     VkImageMemoryBarrier b = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+@@ -2110,6 +2323,7 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+     VkCommandBuffer cb = vk_present_record_begin();
+     if (cb) vk_present_record_end(cb);
+     pthread_mutex_unlock(&s_vk.present_mu);
++    vk_pcache_save(0);
+     s_g.last_draws = s_g.draws;
+     s_g.draws = 0;
+ }
+@@ -2146,6 +2360,8 @@ typedef struct vk_eng_obj {
+     u8       cube;                   /* TEXTURE: six layers, a CUBE view    */
+     u8       snapshot;               /* COLOR: a feedback copy, never a target */
+     u32      mips;                   /* TEXTURE: levels the image was created with */
++    u32      conv;                   /* DEPTH: its depth_as_color copy (a COLOR snapshot), or 0 */
++    u32      owner;                  /* COLOR snapshot made by depth_as_color: the depth it converts */
+ } vk_eng_obj;
+ 
+ static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
+@@ -2360,6 +2576,10 @@ static void vk_eng_release(void* user, u32 handle)
+     if (s_eobj[handle].kind == VK_ENG_COLOR && s_eobj[handle].snapshot) {
+         /* Never an attachment, so no framebuffer names it; the image goes
+          * back to the pool for the next feedback draw. */
++        if (s_eobj[handle].owner) {
++            vk_eng_obj* d = vk_eng_get(s_eobj[handle].owner, VK_ENG_DEPTH);
++            if (d && d->conv == handle) d->conv = 0;
++        }
+         vk_eng_snapshot_recycle(&s_eobj[handle]);
+         memset(&s_eobj[handle], 0, sizeof s_eobj[handle]);
+         return;
+@@ -2407,12 +2627,14 @@ static void vk_eng_depth_target_release(void* user, u32 handle)
+ }
+ 
+ static void vk_eng_snapshot_pool_drain(void);
++static void vk_eng_dac_shutdown(void);
+ 
+ static void vk_eng_shutdown(void* user)
+ {
+     vk_eng2_shutdown(user);
+     for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++) vk_eng_release(user, i);
+     vk_eng_snapshot_pool_drain();
++    vk_eng_dac_shutdown();
+     vk_eb_release();
+     vk_destroy_buffer(&s_rb_stage);
+     vk_destroy_buffer(&s_up_stage);
+@@ -2421,7 +2643,7 @@ static void vk_eng_shutdown(void* user)
+ static void vk_eng_submit_and_wait(void* user, u32 reason)
+ {
+     (void)user; (void)reason;      /* every other submission has already completed */
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_drain();
+ }
+ 
+ static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -2560,6 +2782,7 @@ static void vk_eng_present(void* user, u32 surface)
+         vk_present_record_end(cb);
+     }
+     pthread_mutex_unlock(&s_vk.present_mu);
++    vk_pcache_save(0);   /* 90a: the engine's present, not vk_cb_present */
+     s_g.last_draws = s_g.draws;
+     s_g.draws = 0;
+ }
+@@ -2619,6 +2842,7 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+                                  u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
+ {
+     (void)user;
++    const int batched = vk_eb_active();
+     u32 bpp;
+     const VkFormat vf = vk_eng_format(fmt, &bpp);
+     const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
+@@ -2653,9 +2877,10 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+     o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h; o->cube = (u8)cube; o->mips = mips;
+     o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0;
+     /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
+-    if (vk_begin()) goto fail;
++    if (batched ? (!s_eb_pending && vk_begin()) : vk_begin()) goto fail;
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+-    if (vk_submit_and_wait()) goto fail;
++    if (batched) vk_eb_recorded();
++    else if (vk_submit_and_wait()) goto fail;
+     return hd;
+ fail:
+     vk_destroy_image(&o->im);
+@@ -2760,7 +2985,9 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+     }
+     o->kind = VK_ENG_COLOR; o->snapshot = 1;
+     o->fmt = t->fmt; o->bpp = t->bpp; o->w = t->w; o->h = t->h;
+-    if (vk_begin()) { vk_eng_release(user, hd); return 0; }
++    /* 90b: into the open draw batch like a clear: queue order + barriers, no wait. */
++    const int batched = vk_eb_active();
++    if (batched ? (!s_eb_pending && vk_begin()) : vk_begin()) { vk_eng_release(user, hd); return 0; }
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                      reused ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED);
+     vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+@@ -2773,7 +3000,8 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+                     o->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+     /* The copy, made visible to whatever samples it next. */
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-    if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
++    if (batched) vk_eb_recorded();
++    else if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
+     return hd;
+ }
+ 
+@@ -2865,6 +3093,254 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+     }
+     return rc ? 0 : snap;
+ }
++
++static struct {
++    VkDescriptorSetLayout dsl;
++    VkPipelineLayout pl;
++    VkPipeline pipe;
++    VkDescriptorPool pool;
++    VkDescriptorSet set;
++    vk_buffer buf;
++    int failed;
++    int ready;
++    u32 n;
++} s_dac;
++
++static int vk_eng_dac_init(void)
++{
++    static const char src[] =
++        "[[vk::binding(0, 0)]] RWStructuredBuffer<uint> buf;\n"
++        "uint round24(float d) {\n"
++        "    if (d >= 1.0) return 0xFFFFFFu;\n"
++        "    if (!(d > 0.0)) return 0u;\n"
++        "    uint b = asuint(d);\n"
++        "    uint e = (b >> 23) & 0xFFu;\n"
++        "    uint m = (b & 0x7FFFFFu) | (e != 0u ? 0x800000u : 0u);\n"
++        "    uint s = 150u - max(e, 1u);\n"
++        "    uint lo = m << 24;\n"
++        "    uint hi = m >> 8;\n"
++        "    uint borrow = (lo < m) ? 1u : 0u;\n"
++        "    lo = lo - m; hi = hi - borrow;\n"
++        "    uint hb = s - 1u;\n"
++        "    if (hb < 32u) { uint t = lo + (1u << hb); hi += (t < lo) ? 1u : 0u; lo = t; }\n"
++        "    else if (hb < 64u) { hi += 1u << (hb - 32u); }\n"
++        "    if (s >= 64u) return 0u;\n"
++        "    if (s >= 32u) return hi >> (s - 32u);\n"
++        "    return (lo >> s) | (hi << (32u - s));\n"
++        "}\n"
++        "[numthreads(64, 1, 1)]\n"
++        "void main(uint3 id : SV_DispatchThreadID) {\n"
++        "    uint v = round24(asfloat(buf[id.x]));\n"
++        "    buf[id.x] = ((v >> 8) & 0xFFu) | ((v & 0xFFu) << 8) | ((v >> 16) << 24);\n"
++        "}\n";
++    static u32 words[4096];
++    char log[1024];
++    u32 n;
++    const char* what = "HLSL to SPIR-V";
++    VkShaderModule sm = VK_NULL_HANDLE;
++
++    if (s_dac.ready) return 0;
++    if (s_dac.failed) return -1;
++    if (rsx_hlsl_to_spirv(src, RSX_SHADER_STAGE_COMPUTE, words, 4096, &n,
++                          log, sizeof log))
++        goto fail;
++
++    VkDescriptorSetLayoutBinding binding = {
++        .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
++        .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
++    };
++    VkDescriptorSetLayoutCreateInfo dlci = {
++        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
++        .bindingCount = 1, .pBindings = &binding,
++    };
++    if (pvkCreateDescriptorSetLayout(s_vk.device, &dlci, NULL, &s_dac.dsl) != VK_SUCCESS) {
++        what = "vkCreateDescriptorSetLayout";
++        goto fail;
++    }
++    VkPipelineLayoutCreateInfo plci = {
++        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
++        .setLayoutCount = 1, .pSetLayouts = &s_dac.dsl,
++    };
++    if (pvkCreatePipelineLayout(s_vk.device, &plci, NULL, &s_dac.pl) != VK_SUCCESS) {
++        what = "vkCreatePipelineLayout";
++        goto fail;
++    }
++    VkShaderModuleCreateInfo smci = {
++        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
++        .codeSize = (size_t)n * sizeof words[0], .pCode = words,
++    };
++    if (pvkCreateShaderModule(s_vk.device, &smci, NULL, &sm) != VK_SUCCESS) {
++        what = "vkCreateShaderModule";
++        goto fail;
++    }
++    VkComputePipelineCreateInfo cpci = {
++        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
++        .stage = {
++            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
++            .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main",
++        },
++        .layout = s_dac.pl,
++    };
++    VkResult r = pvkCreateComputePipelines(s_vk.device, s_pcache, 1, &cpci, NULL, &s_dac.pipe);
++    pvkDestroyShaderModule(s_vk.device, sm, NULL);
++    sm = VK_NULL_HANDLE;
++    if (r != VK_SUCCESS) {
++        what = "vkCreateComputePipelines";
++        goto fail;
++    }
++    VkDescriptorPoolSize ps = {
++        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
++    };
++    VkDescriptorPoolCreateInfo dpci = {
++        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
++        .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps,
++    };
++    if (pvkCreateDescriptorPool(s_vk.device, &dpci, NULL, &s_dac.pool) != VK_SUCCESS) {
++        what = "vkCreateDescriptorPool";
++        goto fail;
++    }
++    VkDescriptorSetAllocateInfo dsai = {
++        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
++        .descriptorPool = s_dac.pool, .descriptorSetCount = 1,
++        .pSetLayouts = &s_dac.dsl,
++    };
++    if (pvkAllocateDescriptorSets(s_vk.device, &dsai, &s_dac.set) != VK_SUCCESS) {
++        what = "vkAllocateDescriptorSets";
++        goto fail;
++    }
++    s_dac.ready = 1;
++    VK_LOG("engine: depth_as_color on GPU (compute)\n");
++    return 0;
++
++fail:
++    if (sm) pvkDestroyShaderModule(s_vk.device, sm, NULL);
++    s_dac.failed = 1;
++    VK_LOG("engine: depth_as_color compute unavailable (%s)\n", what);
++    return -1;
++}
++
++static int vk_eng_dac_buffer(VkDeviceSize need)
++{
++    if (s_dac.buf.size >= need) return 0;
++    vk_destroy_buffer(&s_dac.buf);
++    if (vk_create_device_buffer(&s_dac.buf, need,
++                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
++                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
++                                VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
++        vk_destroy_buffer(&s_dac.buf);
++        s_dac.failed = 1;
++        VK_LOG("engine: depth_as_color compute unavailable (buffer)\n");
++        return -1;
++    }
++    VkDescriptorBufferInfo bi = {
++        .buffer = s_dac.buf.buf, .offset = 0, .range = VK_WHOLE_SIZE,
++    };
++    VkWriteDescriptorSet write = {
++        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
++        .dstSet = s_dac.set, .dstBinding = 0,
++        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
++        .pBufferInfo = &bi,
++    };
++    pvkUpdateDescriptorSets(s_vk.device, 1, &write, 0, NULL);
++    return 0;
++}
++
++static u32 vk_eng_depth_as_color(void* user, u32 depth, u32 w, u32 h, u32 rsx_fmt)
++{
++    (void)user;
++    if (rsx_fmt != 0x85) return 0;    /* RSX_TEX_FMT_A8R8G8B8 */
++    if (s_vk.depth_format != VK_FORMAT_D32_SFLOAT &&
++        s_vk.depth_format != VK_FORMAT_D32_SFLOAT_S8_UINT)
++        return 0;
++    vk_eng_obj* z = vk_eng_get(depth, VK_ENG_DEPTH);
++    if (!z || !w || !h || w > z->w || h > z->h || s_dac.failed ||
++        (!s_dac.ready && vk_eng_dac_init()))
++        return 0;
++
++    const u32 texels = w * h;
++    const u32 padded = (texels + 63u) / 64u * 64u;
++    if (vk_eng_dac_buffer((VkDeviceSize)padded * 4u)) return 0;
++
++    u32 hd = z->conv;
++    vk_eng_obj* o = vk_eng_get(hd, VK_ENG_COLOR);
++    int reused = o && o->snapshot && o->owner == depth && o->w == w && o->h == h;
++    int fresh = 0;
++    if (!reused) {
++        hd = vk_eng_alloc();
++        if (!hd) return 0;
++        o = &s_eobj[hd];
++        for (u32 i = 0; i < s_snap_pool_n; i++)
++            if (s_snap_pool[i].fmt == VK_FORMAT_R8G8B8A8_UNORM &&
++                s_snap_pool[i].w == w && s_snap_pool[i].h == h) {
++                o->im = s_snap_pool[i].im;
++                s_snap_pool[i] = s_snap_pool[--s_snap_pool_n];
++                reused = 1;
++                break;
++            }
++        if (!reused && vk_create_image(&o->im, VK_FORMAT_R8G8B8A8_UNORM, w, h,
++                                        VK_IMAGE_USAGE_SAMPLED_BIT |
++                                        VK_IMAGE_USAGE_TRANSFER_DST_BIT,
++                                        VK_IMAGE_ASPECT_COLOR_BIT)) {
++            vk_destroy_image(&o->im);
++            memset(o, 0, sizeof *o);
++            return 0;
++        }
++        o->kind = VK_ENG_COLOR; o->snapshot = 1; o->owner = depth;
++        o->fmt = VK_FORMAT_R8G8B8A8_UNORM; o->bpp = 4; o->w = w; o->h = h;
++        z = vk_eng_get(depth, VK_ENG_DEPTH);
++        z->conv = hd;
++        fresh = 1;
++    }
++
++    const int batched = vk_eb_active();
++    if (batched ? (!s_eb_pending && vk_begin()) : vk_begin()) {
++        if (fresh) vk_eng_release(user, hd);
++        return 0;
++    }
++    vk_cmd_after_everything(s_vk.cmd);
++    vk_barrier_image(z->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
++    VkBufferImageCopy out = {
++        .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
++        .imageExtent = { w, h, 1 },
++    };
++    pvkCmdCopyImageToBuffer(s_vk.cmd, z->im.img, VK_IMAGE_LAYOUT_GENERAL,
++                            s_dac.buf.buf, 1, &out);
++    vk_cmd_after_everything(s_vk.cmd);
++    pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_dac.pipe);
++    pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_dac.pl,
++                             0, 1, &s_dac.set, 0, NULL);
++    pvkCmdDispatch(s_vk.cmd, padded / 64u, 1, 1);
++    vk_cmd_after_everything(s_vk.cmd);
++    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT,
++                     reused ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED);
++    VkBufferImageCopy in = {
++        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++        .imageExtent = { w, h, 1 },
++    };
++    pvkCmdCopyBufferToImage(s_vk.cmd, s_dac.buf.buf, o->im.img,
++                            VK_IMAGE_LAYOUT_GENERAL, 1, &in);
++    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    if (batched) vk_eb_recorded();
++    else if (vk_submit_and_wait()) {
++        if (fresh) vk_eng_release(user, hd);
++        return 0;
++    }
++    s_dac.n++;
++    if (s_dac.n <= 4)
++        VK_LOG("[dac] depth %u -> %u %ux%u%s\n", depth, hd, w, h,
++               reused ? " (refill)" : "");
++    return hd;
++}
++
++static void vk_eng_dac_shutdown(void)
++{
++    if (s_dac.buf.buf) vk_destroy_buffer(&s_dac.buf);
++    if (s_dac.pipe) pvkDestroyPipeline(s_vk.device, s_dac.pipe, NULL);
++    if (s_dac.pl) pvkDestroyPipelineLayout(s_vk.device, s_dac.pl, NULL);
++    if (s_dac.pool) pvkDestroyDescriptorPool(s_vk.device, s_dac.pool, NULL);
++    if (s_dac.dsl) pvkDestroyDescriptorSetLayout(s_vk.device, s_dac.dsl, NULL);
++    memset(&s_dac, 0, sizeof s_dac);
++}
+ /* The depth aspect of a D32_SFLOAT target copies out as 32-bit floats, which
+  * is what the engine asks for; other depth formats report failure. */
+ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32 h,
+@@ -2973,7 +3449,7 @@ static u32 s_esamp_count;
+ 
+ static void vk_eng_drop_framebuffers(void)
+ {
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_drain();                 /* 68c: pending segments may use them */
+     for (u32 i = 0; i < s_e2.fb_count; i++)
+         if (s_e2.fb[i].fb) pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
+     s_e2.fb_count = 0;
+@@ -3183,8 +3659,8 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
+ static void vk_eng_pipeline_release(void* user, u32 pipeline)
+ {
+     (void)user;
+-    if (s_eb_pending) vk_eng_flush();
+     if (!pipeline || pipeline > VK_ENG_MAX_PIPE || !s_epipe[pipeline - 1].used) return;
++    vk_eng_drain();
+     vk_eng_pipe* P = &s_epipe[pipeline - 1];
+     for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
+         if (P->variant[t]) pvkDestroyPipeline(s_vk.device, P->variant[t], NULL);
+@@ -3331,8 +3807,11 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+         .pViewportState = &vps, .pRasterizationState = &ras, .pMultisampleState = &ms,
+         .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy,
+         .layout = layout, .renderPass = rp, .subpass = 0 };
+-    if (pvkCreateGraphicsPipelines(s_vk.device, VK_NULL_HANDLE, 1, &gci, NULL,
+-                                   &P->variant[topo_idx]) != VK_SUCCESS) {
++    const uint64_t tp0 = vk_saw_ns();
++    VkResult pipe_r = pvkCreateGraphicsPipelines(s_vk.device, s_pcache, 1, &gci, NULL,
++                                                  &P->variant[topo_idx]);
++    s_rbk_pipe_n++; s_rbk_pipe_ns += vk_saw_ns() - tp0; s_pcache_dirty++;
++    if (pipe_r != VK_SUCCESS) {
+         VK_LOG("engine: vkCreateGraphicsPipelines failed\n");
+         P->variant[topo_idx] = VK_NULL_HANDLE;
+     }
+@@ -3343,6 +3822,7 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+ 
+ static void vk_eng2_shutdown(void* user)
+ {
++    vk_eng_drain();
+     for (u32 i = 1; i <= VK_ENG_MAX_PIPE; i++) vk_eng_pipeline_release(user, i);
+     vk_eng_drop_framebuffers();
+     for (u32 f = 0; f < VK_ENG_RT_FORMATS; f++)
+@@ -3566,17 +4046,61 @@ static VkImageView vk_eng_dummy_cube_view(void)
+ #define VK_EB_UB_BYTES   (32u << 20)
+ #define VK_EB_SB_BYTES   (64u << 20)   /* texture upload staging */
+ #define VK_EB_MAX_SETS   1024u
++#define VK_EB_MAX_SEGS   4u   /* 68c: VK_ASYNC_SEGS (def. 3; 1 = wait per flush as before) */
+ 
++/* 68c: the rings are split in `segs` parts, each with its own command buffer,
++ * fence and descriptor pool. A flush submits the open segment without waiting
++ * and waits only for the fence of the segment it moves on to (RPCS3-style). */
+ static struct {
+     int              on;            /* -1 undecided, 0 off, 1 on */
+-    u32              max_draws;
++    u32              max_draws, segs, cur;
+     vk_buffer        vb, ib, ub, sb;
+     VkDeviceSize     vb_head, ib_head, ub_head, sb_head, ub_align;
+-    VkDescriptorPool pool;
+-    u32              sets;
++    VkCommandBuffer  cmd[VK_EB_MAX_SEGS];
++    VkFence          fence[VK_EB_MAX_SEGS];
++    int              pending[VK_EB_MAX_SEGS];
++    VkDescriptorPool pool[VK_EB_MAX_SEGS];
++    u32              sets[VK_EB_MAX_SEGS];
+     unsigned long long draws, flushes;
+ } s_eb = { .on = -1 };
+ 
++static VkDeviceSize vk_eb_seg_end(VkDeviceSize bytes)
++{
++    return (VkDeviceSize)(s_eb.cur + 1u) * bytes / s_eb.segs;
++}
++
++static void vk_eb_reset_segment(u32 seg)
++{
++    s_eb.vb_head = (VkDeviceSize)seg * VK_EB_VB_BYTES / s_eb.segs;
++    s_eb.ib_head = (VkDeviceSize)seg * VK_EB_IB_BYTES / s_eb.segs;
++    s_eb.ub_head = (VkDeviceSize)seg * VK_EB_UB_BYTES / s_eb.segs;
++    s_eb.sb_head = (VkDeviceSize)seg * VK_EB_SB_BYTES / s_eb.segs;
++    if (s_eb.sets[seg] && pvkResetDescriptorPool(s_vk.device, s_eb.pool[seg], 0) != VK_SUCCESS)
++        VK_LOG("vkResetDescriptorPool failed\n");
++    s_eb.sets[seg] = 0;
++}
++
++static void vk_eb_wait_segment(u32 seg)
++{
++    if (!s_eb.pending[seg]) return;
++    const uint64_t t0 = vk_saw_ns();
++    if (pvkWaitForFences(s_vk.device, 1, &s_eb.fence[seg], VK_TRUE, UINT64_MAX) != VK_SUCCESS)
++        VK_LOG("vkWaitForFences (draw batch) failed\n");
++    s_saw_wait += vk_saw_ns() - t0;
++    s_eb.pending[seg] = 0;
++}
++
++static void vk_eb_all_complete(void)
++{
++    for (u32 i = 0; i < s_eb.segs; i++) vk_eb_wait_segment(i);
++}
++
++static int vk_eb_any_pending(void)
++{
++    for (u32 i = 0; i < s_eb.segs; i++) if (s_eb.pending[i]) return 1;
++    return 0;
++}
++
+ static int vk_eb_on(void)
+ {
+     if (s_eb.on >= 0) return s_eb.on;
+@@ -3586,6 +4110,11 @@ static int vk_eb_on(void)
+     const char* m = getenv("VK_DRAW_BATCH_MAX");
+     s_eb.max_draws = m && atoi(m) > 0 ? (u32)atoi(m) : 512u;
+     if (s_eb.max_draws > VK_EB_MAX_SETS) s_eb.max_draws = VK_EB_MAX_SETS;
++    const char* a = getenv("VK_ASYNC_SEGS");
++    int segs = a ? atoi(a) : 3;
++    if (segs < 1) segs = 1;
++    if (segs > (int)VK_EB_MAX_SEGS) segs = VK_EB_MAX_SEGS;
++    s_eb.segs = (u32)segs;
+     VkPhysicalDeviceProperties p;
+     pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
+     s_eb.ub_align = p.limits.minUniformBufferOffsetAlignment ? p.limits.minUniformBufferOffsetAlignment : 256;
+@@ -3596,29 +4125,50 @@ static int vk_eb_on(void)
+     };
+     VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                        .maxSets = VK_EB_MAX_SETS, .poolSizeCount = 3, .pPoolSizes = ps };
++    s_eb.cmd[0] = s_vk.cmd;
++    if (s_eb.segs > 1) {
++        VkCommandBufferAllocateInfo cai = {
++            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++            .commandPool = s_vk.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++            .commandBufferCount = s_eb.segs - 1u };
++        if (pvkAllocateCommandBuffers(s_vk.device, &cai, &s_eb.cmd[1]) != VK_SUCCESS) goto fail;
++    }
++    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++                              .flags = VK_FENCE_CREATE_SIGNALED_BIT };
++    for (u32 i = 0; i < s_eb.segs; i++)
++        if (pvkCreateFence(s_vk.device, &fci, NULL, &s_eb.fence[i]) != VK_SUCCESS) goto fail;
+     if (vk_create_host_buffer(&s_eb.vb, VK_EB_VB_BYTES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) || !s_eb.vb.coherent ||
+         vk_create_host_buffer(&s_eb.ib, VK_EB_IB_BYTES, VK_BUFFER_USAGE_INDEX_BUFFER_BIT) || !s_eb.ib.coherent ||
+         vk_create_host_buffer(&s_eb.ub, VK_EB_UB_BYTES, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) || !s_eb.ub.coherent ||
+-        vk_create_host_buffer(&s_eb.sb, VK_EB_SB_BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) || !s_eb.sb.coherent ||
+-        pvkCreateDescriptorPool(s_vk.device, &pci, NULL, &s_eb.pool) != VK_SUCCESS) {
+-        VK_LOG("draw batching: no host-coherent ring memory, staying off\n");
+-        return 0;
+-    }
+-    VK_LOG("draw batching: on (up to %u draws per submission)\n", s_eb.max_draws);
++        vk_create_host_buffer(&s_eb.sb, VK_EB_SB_BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) || !s_eb.sb.coherent)
++        goto fail;
++    for (u32 i = 0; i < s_eb.segs; i++)
++        if (pvkCreateDescriptorPool(s_vk.device, &pci, NULL, &s_eb.pool[i]) != VK_SUCCESS) goto fail;
++    vk_eb_reset_segment(0);
++    VK_LOG("draw batching: on (up to %u draws per submission, %u async segments)\n",
++           s_eb.max_draws, s_eb.segs);
+     s_eb.on = 1;
+     return 1;
++fail:
++    VK_LOG("draw batching: no host-coherent ring memory, staying off\n");
++    vk_eb_release();
++    s_eb.on = 0;
++    return 0;
+ }
+ 
+ /* The rings and the pool live until the engine shuts down; a later vk_eb_on
+  * decides again. Also frees what a failed vk_eb_on had already created. */
+ static void vk_eb_release(void)
+ {
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_drain();
++    if (s_eb.cmd[0]) s_vk.cmd = s_eb.cmd[0];
+     vk_destroy_buffer(&s_eb.vb);
+     vk_destroy_buffer(&s_eb.ib);
+     vk_destroy_buffer(&s_eb.ub);
+     vk_destroy_buffer(&s_eb.sb);
+-    if (s_eb.pool) pvkDestroyDescriptorPool(s_vk.device, s_eb.pool, NULL);
++    for (u32 i = 0; i < s_eb.segs; i++) {
++        if (s_eb.pool[i])  pvkDestroyDescriptorPool(s_vk.device, s_eb.pool[i], NULL);
++        if (s_eb.fence[i]) pvkDestroyFence(s_vk.device, s_eb.fence[i], NULL);    }
+     memset(&s_eb, 0, sizeof s_eb);
+     s_eb.on = -1;
+ }
+@@ -3639,11 +4189,11 @@ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src,
+ {
+     if (!vk_eb_active()) return -2;
+     const VkDeviceSize bytes = (VkDeviceSize)tight * rows;
+-    if (!bytes || bytes > VK_EB_SB_BYTES) return -2;
+-    VkDeviceSize off = vk_eb_take(&s_eb.sb_head, VK_EB_SB_BYTES, bytes, 16u);
++    if (!bytes || bytes > VK_EB_SB_BYTES / s_eb.segs) return -2;
++    VkDeviceSize off = vk_eb_take(&s_eb.sb_head, vk_eb_seg_end(VK_EB_SB_BYTES), bytes, 16u);
+     if (off == (VkDeviceSize)-1) {
+         vk_eng_flush();
+-        off = vk_eb_take(&s_eb.sb_head, VK_EB_SB_BYTES, bytes, 16u);
++        off = vk_eb_take(&s_eb.sb_head, vk_eb_seg_end(VK_EB_SB_BYTES), bytes, 16u);
+         if (off == (VkDeviceSize)-1) return -2;
+     }
+     for (u32 y = 0; y < rows; y++)
+@@ -3661,13 +4211,36 @@ static void vk_eng_flush(void)
+ {
+     if (!s_eb_pending) return;
+     s_eb_pending = 0;               /* first: the submit below must not re-enter */
+-    vk_submit_and_wait();
+-    s_eb.vb_head = s_eb.ib_head = s_eb.ub_head = s_eb.sb_head = 0;
+-    if (s_eb.sets) { pvkResetDescriptorPool(s_vk.device, s_eb.pool, 0); s_eb.sets = 0; }
++    /* 68c: submit without waiting; wait only for the segment reused next. */
++    const u32 seg = s_eb.cur;
++    if (pvkEndCommandBuffer(s_vk.cmd) != VK_SUCCESS) { VK_LOG("vkEndCommandBuffer (batch) failed\n"); return; }
++    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++                        .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
++    if (pvkResetFences(s_vk.device, 1, &s_eb.fence[seg]) != VK_SUCCESS) { VK_LOG("vkResetFences (batch) failed\n"); return; }
++    const uint64_t t0 = vk_saw_ns();
++    if (vk_queue_submit(&si, s_eb.fence[seg]) != VK_SUCCESS) { VK_LOG("vkQueueSubmit (batch) failed\n"); return; }
++    s_saw_sub += vk_saw_ns() - t0;
++    s_eb.pending[seg] = 1;
++    s_eb.cur = (seg + 1u) % s_eb.segs;
++    s_vk.cmd = s_eb.cmd[s_eb.cur];
++    vk_eb_wait_segment(s_eb.cur);
++    vk_eb_reset_segment(s_eb.cur);
++    vk_rbk_report();
++    if ((++s_saw_n & 255u) == 0) {
++        VK_LOG("[saw] 256 calls: submit %.1f ms wait %.1f ms (total calls %llu, %u segs)\n",
++               s_saw_sub / 1e6, s_saw_wait / 1e6, (unsigned long long)s_saw_n, s_eb.segs);
++        s_saw_sub = s_saw_wait = 0;
++    }
+     if ((++s_eb.flushes & 0x3FFFu) == 0)
+         VK_LOG("draw batching: %llu draws in %llu submissions\n", s_eb.draws, s_eb.flushes);
+ }
+ 
++static void vk_eng_drain(void)
++{
++    vk_eng_flush();
++    vk_eb_all_complete();
++}
++
+ static VkDeviceSize vk_eb_take(VkDeviceSize* head, VkDeviceSize cap, VkDeviceSize bytes, VkDeviceSize align)
+ {
+     const VkDeviceSize at = (*head + align - 1u) / align * align;
+@@ -3775,25 +4348,25 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     VkDeviceSize voff = 0, ioff = 0;
+     VkDescriptorSet set = VK_NULL_HANDLE;
+     const u32 vsb = s_e2.vs_bytes ? s_e2.vs_bytes : 16u, psb = s_e2.ps_bytes ? s_e2.ps_bytes : 16u;
+-    int batched = vk_eb_on() && vbytes <= VK_EB_VB_BYTES && ibytes <= VK_EB_IB_BYTES;
++    int batched = vk_eb_on() && vbytes <= VK_EB_VB_BYTES / s_eb.segs && ibytes <= VK_EB_IB_BYTES / s_eb.segs;
+     if (batched && P->cube_mask && !vk_eng_dummy_cube_view()) return;   /* may flush: before any slice */
+     if (batched) {
+         /* Slices of the rings and a set from the pool; a full one flushes the
+          * batch (which empties them all) and the draw takes its slices again. */
+         for (int tries = 0; tries < 2; tries++) {
+             VkDeviceSize vh = s_eb.vb_head, ih = s_eb.ib_head, uh = s_eb.ub_head;
+-            voff = vk_eb_take(&vh, VK_EB_VB_BYTES, vbytes, 16u);
+-            ioff = ibytes ? vk_eb_take(&ih, VK_EB_IB_BYTES, ibytes, 16u) : 0;
+-            const VkDeviceSize uvs = vk_eb_take(&uh, VK_EB_UB_BYTES, vsb, s_eb.ub_align);
+-            const VkDeviceSize ups = uvs == (VkDeviceSize)-1 ? uvs : vk_eb_take(&uh, VK_EB_UB_BYTES, psb, s_eb.ub_align);
++            voff = vk_eb_take(&vh, vk_eb_seg_end(VK_EB_VB_BYTES), vbytes, 16u);
++            ioff = ibytes ? vk_eb_take(&ih, vk_eb_seg_end(VK_EB_IB_BYTES), ibytes, 16u) : 0;
++            const VkDeviceSize uvs = vk_eb_take(&uh, vk_eb_seg_end(VK_EB_UB_BYTES), vsb, s_eb.ub_align);
++            const VkDeviceSize ups = uvs == (VkDeviceSize)-1 ? uvs : vk_eb_take(&uh, vk_eb_seg_end(VK_EB_UB_BYTES), psb, s_eb.ub_align);
+             if (voff != (VkDeviceSize)-1 && ioff != (VkDeviceSize)-1 && ups != (VkDeviceSize)-1 &&
+-                s_eb.sets < VK_EB_MAX_SETS) {
++                s_eb.sets[s_eb.cur] < VK_EB_MAX_SETS) {
+                 VkDescriptorSetLayout lay = P->cube_mask ? s_e2.split_layout : s_g.set_layout;
+                 VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+-                                                    .descriptorPool = s_eb.pool, .descriptorSetCount = 1,
++                                                    .descriptorPool = s_eb.pool[s_eb.cur], .descriptorSetCount = 1,
+                                                     .pSetLayouts = &lay };
+                 if (pvkAllocateDescriptorSets(s_vk.device, &dai, &set) == VK_SUCCESS) {
+-                    s_eb.sets++;
++                    s_eb.sets[s_eb.cur]++;
+                     s_eb.vb_head = vh; s_eb.ib_head = ih; s_eb.ub_head = uh;
+                     memcpy((u8*)s_eb.ub.ptr + uvs, vk_eng_ucpu(), vsb);
+                     memcpy((u8*)s_eb.ub.ptr + ups, vk_eng_ucpu() + s_g.ps_off, psb);
+@@ -3888,6 +4461,7 @@ static const rsx_draw_backend s_vk_engine_backend = {
+     .depth_target_create  = vk_eng_depth_target_create,
+     .depth_target_release = vk_eng_depth_target_release,
+     .depth_snapshot       = vk_eng_depth_snapshot,
++    .depth_as_color       = vk_eng_depth_as_color,
+     .color_snapshot       = vk_eng_color_snapshot,
+     .pipeline_create      = vk_eng_pipeline_create,
+     .pipeline_release     = vk_eng_pipeline_release,
+@@ -4014,6 +4588,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     if (s_vk.windowed && vk_load_wsi_device_functions())
+         vk_window_drop("the driver has no swapchain functions");
+     pvkGetDeviceQueue(s_vk.device, s_vk.queue_family, 0, &s_vk.queue);
++    vk_pcache_open();
+ 
+     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                     .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+@@ -4225,4 +4800,19 @@ int rsx_vulkan_backend_depth_bounds(void)
      return s_vk.eng_active && s_vk.depth_bounds_ok;
  }
  
@@ -567,11 +1941,191 @@ index f78c66f2..5b9f5f9c 100644
 +#endif
 +
  #endif /* !_WIN32 */
+diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
+index 30538f14..d3c733ad 100644
+--- a/runtime/platform/win32_compat.h
++++ b/runtime/platform/win32_compat.h
+@@ -463,13 +463,135 @@ static inline void ps3__rwl_init(void* p) { pthread_rwlock_init((pthread_rwlock_
+ static inline pthread_rwlock_t* ps3_srw(SRWLOCK* l)
+ { return (pthread_rwlock_t*)ps3_lazy_obj((void**)l, sizeof(pthread_rwlock_t), ps3__rwl_init); }
+ 
+-static inline void InitializeSRWLock(SRWLOCK* l)          { *l = NULL; }
+-static inline void AcquireSRWLockExclusive(SRWLOCK* l)    { pthread_rwlock_wrlock(ps3_srw(l)); }
+-static inline void ReleaseSRWLockExclusive(SRWLOCK* l)    { pthread_rwlock_unlock(ps3_srw(l)); }
+-static inline BOOL TryAcquireSRWLockExclusive(SRWLOCK* l) { return pthread_rwlock_trywrlock(ps3_srw(l)) == 0; }
+-static inline void AcquireSRWLockShared(SRWLOCK* l)       { pthread_rwlock_rdlock(ps3_srw(l)); }
+-static inline void ReleaseSRWLockShared(SRWLOCK* l)       { pthread_rwlock_unlock(ps3_srw(l)); }
+-static inline BOOL TryAcquireSRWLockShared(SRWLOCK* l)    { return pthread_rwlock_tryrdlock(ps3_srw(l)) == 0; }
++/* 80c: on Switch the SRW lock is libnx's RwLock (runtime/platform/switch_srw.c).
++ * newlib's pthread_rwlock takes its inner mutex blocking even in trywrlock and
++ * broadcasts every writer on unlock; libnx's try is a pure atomic. */
++#if defined(__SWITCH__)
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void* ps3_nx_rwl_new(void);
++void  ps3_nx_wlock(void* r);
++void  ps3_nx_wunlock(void* r);
++int   ps3_nx_trywlock(void* r);
++void  ps3_nx_rlock(void* r);
++void  ps3_nx_runlock(void* r);
++int   ps3_nx_tryrlock(void* r);
++
++#ifdef __cplusplus
++}
++#endif
++
++static inline void* ps3_srw_nx(SRWLOCK* l)
++{
++    void* r = __atomic_load_n(l, __ATOMIC_ACQUIRE);
++
++    if (!r)
++    {
++        void* created = ps3_nx_rwl_new();
++        void* expected = NULL;
++
++        if (!__atomic_compare_exchange_n(l, &expected, created, 0,
++                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++        {
++            free(created);
++            r = expected;
++        }
++        else
++        {
++            r = created;
++        }
++    }
++
++    return r;
++}
++
++static inline void InitializeSRWLock(SRWLOCK* l)
++{
++    *l = NULL;
++}
++
++static inline void AcquireSRWLockExclusive(SRWLOCK* l)
++{
++    ps3_nx_wlock(ps3_srw_nx(l));
++}
++
++static inline void ReleaseSRWLockExclusive(SRWLOCK* l)
++{
++    ps3_nx_wunlock(ps3_srw_nx(l));
++}
++
++static inline BOOL TryAcquireSRWLockExclusive(SRWLOCK* l)
++{
++    return ps3_nx_trywlock(ps3_srw_nx(l));
++}
++
++static inline void AcquireSRWLockShared(SRWLOCK* l)
++{
++    ps3_nx_rlock(ps3_srw_nx(l));
++}
++
++static inline void ReleaseSRWLockShared(SRWLOCK* l)
++{
++    ps3_nx_runlock(ps3_srw_nx(l));
++}
++
++static inline BOOL TryAcquireSRWLockShared(SRWLOCK* l)
++{
++    return ps3_nx_tryrlock(ps3_srw_nx(l));
++}
++
++#else
++
++static inline void InitializeSRWLock(SRWLOCK* l)
++{
++    *l = NULL;
++}
++
++static inline void AcquireSRWLockExclusive(SRWLOCK* l)
++{
++    int i;
++
++    for (i = 0; i < 512; ++i)
++    {
++        if (pthread_rwlock_trywrlock(ps3_srw(l)) == 0)
++            return;
++
++        if (i != 511)
++            YieldProcessor();
++    }
++
++    pthread_rwlock_wrlock(ps3_srw(l));
++}
++
++static inline void ReleaseSRWLockExclusive(SRWLOCK* l)
++{
++    pthread_rwlock_unlock(ps3_srw(l));
++}
++
++static inline BOOL TryAcquireSRWLockExclusive(SRWLOCK* l)
++{
++    return pthread_rwlock_trywrlock(ps3_srw(l)) == 0;
++}
++
++static inline void AcquireSRWLockShared(SRWLOCK* l)
++{
++    pthread_rwlock_rdlock(ps3_srw(l));
++}
++
++static inline void ReleaseSRWLockShared(SRWLOCK* l)
++{
++    pthread_rwlock_unlock(ps3_srw(l));
++}
++
++static inline BOOL TryAcquireSRWLockShared(SRWLOCK* l)
++{
++    return pthread_rwlock_tryrdlock(ps3_srw(l)) == 0;
++}
++
++#endif
+ 
+ /* ---------------------------------------------------------------------------
+  * Critical sections: a recursive mutex, as on Windows.
 diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
-index 37e37454..2c73466d 100644
+index 37e37454..7f91211e 100644
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
-@@ -341,7 +341,9 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -268,6 +268,24 @@ static DIR* fd_dir(int fd)
+     return fd >= 0 && fd < FS_MAX ? __atomic_load_n(&g_dirs[fd], __ATOMIC_ACQUIRE) : nullptr;
+ }
+ 
++/* FS_REDIRECT=SRC=DST: use the host path with SRC replaced by DST (open and
++ * stat). GoW3 plays OPENINGCREDITS.M2V (~7700 AUs, ~26 min at our frame rate)
++ * before the menu; OPENINGCREDITS.M2V=SMLOGO.M2V swaps in the 330-AU logo. */
++static void fs_redirect(char* hpath, size_t n, const char* gpath)
++{
++    const char* r = getenv("FS_REDIRECT");
++    const char* eq = r ? strchr(r, '=') : nullptr;
++    size_t sl = eq ? (size_t)(eq - r) : 0;
++    if (sl == 0 || sl >= 128) return;
++    char src[128]; memcpy(src, r, sl); src[sl] = 0;
++    char* p = strstr(hpath, src);
++    if (!p) return;
++    char tmp[1100];
++    snprintf(tmp, sizeof tmp, "%.*s%s%s", (int)(p - hpath), hpath, eq + 1, p + sl);
++    snprintf(hpath, n, "%s", tmp);
++    fprintf(stderr, "[fs] redirect '%s' -> '%s'\n", gpath, hpath);
++}
++
+ /* ---- handlers ---- */
+ static void cellFsOpen(ppu_context* ctx)
+ {
+@@ -276,6 +294,7 @@ static void cellFsOpen(ppu_context* ctx)
+     uint32_t flags  = (uint32_t)ctx->gpr[4];
+     uint32_t fd_ptr = (uint32_t)ctx->gpr[5];
+     host_path(hpath, sizeof hpath, gpath);
++    fs_redirect(hpath, sizeof hpath, gpath);
+ 
+     /* NPDRM: see the note in sys_fs.c -- an EDAT is decrypted once into a cache
+      * file and that is opened in its place. */
+@@ -341,7 +360,9 @@ static void cellFsOpen(ppu_context* ctx)
            { const char* want = ps3_env_once("FS_STACK");
              if (want && *want && strstr(gpath, want)) ydkj_host_bt("fs-open");
            } }
@@ -582,7 +2136,15 @@ index 37e37454..2c73466d 100644
      if (ps3_env_once("PS3_FSLOG_BT") && strstr(gpath, ".usm")) {
          /* Resolve to GUEST functions (raw host RVAs are useless here): this tells us
           * which criMv/criFs function opened the movie, so the reader-attach path
-@@ -890,8 +892,28 @@ static void cellFsMkdir(ppu_context* ctx)
+@@ -688,6 +709,7 @@ static void cellFsStat(ppu_context* ctx)
+     guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
+     uint32_t sb = (uint32_t)ctx->gpr[4];
+     host_path(hpath, sizeof hpath, gpath);
++    fs_redirect(hpath, sizeof hpath, gpath);
+     fs_stat64_t st;
+     if (FS_STAT64(hpath, &st) != 0) {
+         if (ps3_env_once("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> ENOENT\n", gpath);
+@@ -890,8 +912,28 @@ static void cellFsMkdir(ppu_context* ctx)
      if (ps3_env_once("PS3_FSLOG")) fprintf(stderr, "[fs] mkdir '%s' -> '%s' (%s)\n", gpath, hpath, r == 0 ? "OK" : "FAIL");
      ctx->gpr[3] = CELL_OK;   /* existing dir is benign for boot */
  }
@@ -614,7 +2176,7 @@ index 37e37454..2c73466d 100644
  {
      int fd = (int)(uint32_t)ctx->gpr[3];
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
-index ea7de18a..84c71d52 100644
+index ea7de18a..2bc02bd4 100644
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
 @@ -942,6 +942,18 @@ extern "C" void ppu_resv_register(ppu_context* c)
@@ -637,7 +2199,7 @@ index ea7de18a..84c71d52 100644
  {
      long n = g_resv_ctx_n; if (n > PPU_RESV_MAX) n = PPU_RESV_MAX;
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 84b7ac96..957a2aa1 100644
+index 84b7ac96..9d6d5d55 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -40,6 +40,7 @@
@@ -648,7 +2210,56 @@ index 84b7ac96..957a2aa1 100644
  
  #ifdef __cplusplus
  extern "C" {
-@@ -1209,6 +1210,7 @@ static void spu_ft_wait_span(spu_context* ctx, uint32_t channel, uint64_t t0)
+@@ -962,6 +963,40 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
+     }
+ }
+ 
++/* 73a: SPU_DMAPROF="img[,secs]": for SPU image `img` only, every secs (10) the
++ * top DMA commands by bytes, keyed by (cmd, 1 MB EA region), with a sample
++ * EA/LSA/size. Diagnostic; racy counters are fine. */
++static void spu_dmaprof(spu_context* ctx, uint32_t cmd)
++{
++    static int s_img = -2, s_secs; static double s_last;
++    if (s_img == -2) { const char* e = getenv("SPU_DMAPROF"); s_img = e ? atoi(e) : -1;
++                       const char* c = e ? strchr(e, ',') : NULL; s_secs = c ? atoi(c + 1) : 10; }
++    if (s_img < 0) return;
++    /* jobmods (ids 200+) run under the WWSP image_id; match the resident overlay like sprof (35a) */
++    int hit = ctx->image_id == s_img || ctx->resident_ovl == s_img;
++    for (int s = 0; s < 4 && !hit; s++) hit = ctx->resident_code[s].image_id == s_img;
++    if (!hit) return;
++    enum { N = 256 };
++    static uint32_t key[N], cnt[N], ea[N], lsa[N], sz[N]; static uint64_t bytes[N];
++    uint32_t k = ((cmd & 0xFFu) << 24) | (ctx->mfc_eal >> 20) | 0x800000u, i = (k * 2654435761u) >> 24;
++    for (unsigned p = 0; p < N && key[i] && key[i] != k; p++) i = (i + 1) % N;
++    if (!key[i] || key[i] == k) { key[i] = k; cnt[i]++; bytes[i] += ctx->mfc_size; ea[i] = ctx->mfc_eal; lsa[i] = ctx->mfc_lsa; sz[i] = ctx->mfc_size; }
++    struct timespec ts; timespec_get(&ts, TIME_UTC);
++    double now = ts.tv_sec + ts.tv_nsec * 1e-9;
++    if (s_last == 0) s_last = now;
++    if (now - s_last < s_secs) return;
++    fprintf(stderr, "[dmaprof] img %d, %.1f s:\n", s_img, now - s_last); s_last = now;
++    for (int r = 0; r < 16; r++) {
++        unsigned b = N; for (unsigned j = 0; j < N; j++) if (cnt[j] && (b == N || bytes[j] > bytes[b])) b = j;
++        if (b == N) break;
++        fprintf(stderr, "[dmaprof]   cmd 0x%02X EA %08X.. n=%u %.1f KB/s (ea=%08X lsa=%05X size=%u)\n",
++                key[b] >> 24, (key[b] & 0xFFFu) << 20, cnt[b], bytes[b] / 1024.0 / s_secs, ea[b], lsa[b], sz[b]);
++        cnt[b] = 0;
++    }
++    memset(key, 0, sizeof key); memset(cnt, 0, sizeof cnt); memset(bytes, 0, sizeof bytes);
++    fflush(stderr);
++}
++
+ static int channel_is_mfc(uint32_t ch)
+ {
+     switch (ch) {
+@@ -1012,6 +1047,7 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
+          * not the plain GET/PUT the DMA engine would do. */
+         if (channel == MFC_Cmd && spu_mfc_atomic(ctx, v))
+             return;
++        if (channel == MFC_Cmd) spu_dmaprof(ctx, v);
+         mfc_channel_write(mfc_for(ctx), ctx, channel, v);
+         /* MFC tag-status-update EVENT producer (channel-stall milestone). Our
+          * DMA completes synchronously, so the instant the program arms tag
+@@ -1209,6 +1245,7 @@ static void spu_ft_wait_span(spu_context* ctx, uint32_t channel, uint64_t t0)
  static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
  {
      if (!yz_ch_block() || spu_ch_ready(ctx, channel)) return;
@@ -656,7 +2267,7 @@ index 84b7ac96..957a2aa1 100644
      const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
  
      { static unsigned long bn = 0; unsigned long n = ++bn;
-@@ -1244,6 +1246,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+@@ -1244,6 +1281,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
      }
      yz_lockstep_block_end(ctx);            /* rejoin the rotation, reacquire the token */
      if (ft_t0) spu_ft_wait_span(ctx, channel, ft_t0);
@@ -664,7 +2275,7 @@ index 84b7ac96..957a2aa1 100644
      ctx->status = SPU_STATUS_RUNNING;
  }
  
-@@ -2692,6 +2695,16 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -2692,6 +2730,16 @@ void spu_indirect_branch(spu_context* ctx)
       * and falls into branch-to-0. All lifted funcs live below SPU_LS_SIZE, so
       * masking is a no-op for already-valid targets. */
      ctx->pc &= SPU_LS_MASK;
@@ -681,7 +2292,7 @@ index 84b7ac96..957a2aa1 100644
      /* Interrupt-return register restore (see spu_drain.c spu_irq_regs_save):
       * the WWS handler's save/restore shim lives at unlifted top-of-LS, so we
       * enforce the preserve-all-registers hardware contract here -- the first
-@@ -2737,7 +2750,24 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -2737,7 +2785,24 @@ void spu_indirect_branch(spu_context* ctx)
                if (s_t && (n <= 4 || (n % 4096) == 0) && s_poll_logs++ < 64)
                    fprintf(stderr, "[spurs-pm] poll #%u (r3=0x%08X) -> continue\n",
                            n, ctx->gpr[3]._u32[0]); }
@@ -707,7 +2318,7 @@ index 84b7ac96..957a2aa1 100644
              /* The kernel's selection copies the instance's first line into the
               * context's tempArea (LS 0x100) on every call, not only at module
               * entry, and jobs that ran since may have overwritten it. */
-@@ -3404,6 +3434,8 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+@@ -3404,6 +3469,8 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
              (unsigned long long)v._u64[1]);
  }
  
@@ -717,8 +2328,44 @@ index 84b7ac96..957a2aa1 100644
  }
  #endif
 \ No newline at end of file
+diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
+index 400b2ba5..8766d8bc 100644
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -641,10 +641,21 @@ static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t
+     g_spu_ls_rdiag = g_spu_ls_probe || spu_ls_wws_probe_on() || g_spu_ls_watch_n != 0;
+ }
+ 
++/* SPU_LS_NO_DIAG (a port's lifted SPU code, for play): no gate at all. Those
++ * accesses are then invisible to the diagnostics above; the interpreter and
++ * the runtime keep their gates. */
++#if defined(SPU_LS_NO_DIAG)
++#define SPU_LS_RDIAG() 0
++#define SPU_LS_WDIAG() 0
++#else
++#define SPU_LS_RDIAG() __builtin_expect(g_spu_ls_rdiag != 0, 0)
++#define SPU_LS_WDIAG() __builtin_expect(g_spu_ls_wdiag != 0, 0)
++#endif
++
+ static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
+ {
+     u128 v;
+-    if (__builtin_expect(g_spu_ls_rdiag != 0, 0))
++    if (SPU_LS_RDIAG())
+         spu_ls_read_diag(ctx, lsa);
+     lsa &= SPU_LS_MASK & ~0xFu;
+     const uint8_t* p = &ctx->ls[lsa];
+@@ -765,7 +776,7 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
+         p[i*4 + 3] = (uint8_t)w;
+     }
+ #endif
+-    if (__builtin_expect(g_spu_ls_wdiag != 0, 0))
++    if (SPU_LS_WDIAG())
+         spu_ls_write_diag(ctx, lsa, val);
+ }
+ 
 diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
-index 6d63141f..0f93eb9b 100644
+index 6d63141f..fae378dc 100644
 --- a/runtime/spu/spu_interp.c
 +++ b/runtime/spu/spu_interp.c
 @@ -9,6 +9,7 @@
@@ -729,7 +2376,43 @@ index 6d63141f..0f93eb9b 100644
  #include <stdio.h>
  #include <stdlib.h>
  
-@@ -428,7 +429,7 @@ static void interp_stats_step(const spu_context* ctx)
+@@ -400,6 +401,7 @@ static void interp_stats_bump(int* img, uint32_t* key, volatile long long* cnt,
+     }
+ }
+ 
++static uint32_t s_is_sig[IS_N][4];   /* 86a: first 16 LS bytes of each page when first seen */
+ static void interp_stats_top(const char* what, int* img, uint32_t* key, volatile long long* cnt, int n)
+ {
+     fprintf(stderr, "  top %s:\n", what);
+@@ -408,6 +410,10 @@ static void interp_stats_top(const char* what, int* img, uint32_t* key, volatile
+         for (int j = 0; j < IS_N; j++)
+             if (cnt[j] > 0 && (best < 0 || cnt[j] > cnt[best])) best = j;
+         if (best < 0) break;
++        if (img == s_is_img)   /* 86a: page signature */
++            fprintf(stderr, "    img=0x%08X ls=0x%05X  %lld  sig=%08X%08X%08X%08X\n", (uint32_t)img[best], key[best], cnt[best],
++                    s_is_sig[best][0], s_is_sig[best][1], s_is_sig[best][2], s_is_sig[best][3]);
++        else
+         fprintf(stderr, "    img=0x%08X ls=0x%05X  %lld\n", (uint32_t)img[best], key[best], cnt[best]);
+         cnt[best] = -cnt[best];
+     }
+@@ -416,7 +422,15 @@ static void interp_stats_top(const char* what, int* img, uint32_t* key, volatile
+ 
+ static void interp_stats_step(const spu_context* ctx)
+ {
+-    interp_stats_bump(s_is_img, s_is_page, s_is_cnt, ctx->image_id, ctx->pc & ~0x3FFu);
++    uint32_t pg = ctx->pc & 0x3FC00u; int own = ctx->image_id;
++    for (unsigned s = 0; s < 4; ++s)   /* 86a: credit the page to its resident owner */
++        if (ctx->resident_code[s].image_id && pg >= ctx->resident_code[s].lsa &&
++            pg - ctx->resident_code[s].lsa < ctx->resident_code[s].size) own = ctx->resident_code[s].image_id;
++    int i; for (i = 0; i < IS_N && s_is_cnt[i]; i++) if (s_is_img[i] == own && s_is_page[i] == pg) break;
++    if (i < IS_N && !s_is_cnt[i]) for (int w = 0; w < 4; w++) {
++        const uint8_t* q = &ctx->ls[pg + 4u * w];
++        s_is_sig[i][w] = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8) | q[3]; }
++    interp_stats_bump(s_is_img, s_is_page, s_is_cnt, own, pg);
+     if ((++s_is_tot & 0xFFFF) != 0) return;
+     struct timespec ts; timespec_get(&ts, TIME_UTC);   /* stdlib: fixtures link this file alone */
+     unsigned long long now = (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)ts.tv_nsec / 1000000ull;
+@@ -428,7 +442,7 @@ static void interp_stats_step(const spu_context* ctx)
      s_is_tot = 0; s_is_t0 = now;
  }
  
@@ -738,7 +2421,7 @@ index 6d63141f..0f93eb9b 100644
      if (interp_stats_on()) {
          /* Credit an entry inside a resident code region to the image that
           * owns it, so the list names the lift that's missing the entry. */
-@@ -543,6 +544,13 @@ uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t sto
+@@ -543,6 +557,13 @@ uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t sto
      }
  }
  
@@ -1112,7 +2795,7 @@ index f922b745..e00c3767 100644
  #endif
      return 1;
 diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
-index b997931b..f4009aca 100644
+index b997931b..c1f3bd71 100644
 --- a/runtime/syscalls/sys_ppu_thread.c
 +++ b/runtime/syscalls/sys_ppu_thread.c
 @@ -24,6 +24,7 @@ static PPU_TLS int     s_exit_armed = 0;
@@ -1153,6 +2836,15 @@ index b997931b..f4009aca 100644
          ps3_thread_name("ppu main");      /* registered from the boot thread itself */
  #ifdef _WIN32
          t->finish_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+@@ -442,7 +451,7 @@ void ppu_prof_stamp(void* vctx, unsigned lr)
+     char* p = (char*)vctx - offsetof(ppu_thread_info, ctx);
+     ppu_thread_info* t = (ppu_thread_info*)p;
+     int in_range = (t >= g_ppu_threads && t < g_ppu_threads + PPU_THREAD_MAX);
+-    if (!in_range) { s_prof_main_pc = lr; return; }
++    if (!in_range) { extern void ps3_wprof_note_main(void); s_prof_main_pc = lr; ps3_wprof_note_main(); return; }
+     { static int _n = 0; if (PS3_LOG_FIRST(_n, 0))
+         fprintf(stderr, "[prof-stamp] ctx=%p base=%p in_range=%d lr=0x%X\n",
+                 vctx, (void*)g_ppu_threads, in_range, lr); }
 diff --git a/include/ps3emu/spu_prof.h b/include/ps3emu/spu_prof.h
 new file mode 100644
 index 00000000..48bb9d3a
@@ -1513,3 +3205,192 @@ index 00000000..af518299
 +    if (s) { t_sprof = NULL; s->used = 0; }
 +}
 +#endif /* !_WIN32 */
+diff --git a/libs/video/l4f_trace.c b/libs/video/l4f_trace.c
+new file mode 100644
+index 00000000..0925ff20
+--- /dev/null
++++ b/libs/video/l4f_trace.c
+@@ -0,0 +1,79 @@
++#include "l4f_trace.h"
++
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++extern unsigned long long ps3_ms_now(void);
++
++enum { L4F_RING_SIZE = 512 };
++
++typedef struct {
++    atomic_uint seq;
++    atomic_uint ms;
++    atomic_uint kind;
++    atomic_uint a;
++    atomic_uint b;
++    atomic_uint c;
++} l4f_event;
++
++static l4f_event s_l4f_ring[L4F_RING_SIZE];
++static atomic_uint s_l4f_index;
++static atomic_int s_l4f_enabled = ATOMIC_VAR_INIT(-1);
++static atomic_int s_l4f_dumps;
++
++static const char* l4f_kind_name(uint32_t kind) {
++    static const char* const names[] = {
++        "RSX_REL_1D74", "RSX_REL_1D70", "SEM_REL_6C", "SEM_ACQ_BLOCK",
++        "SEM_ACQ_PASS", "SET_REF", "PPU_WAIT_ENTER", "PPU_CLEAR",
++        "PPU_FLAG_1BD8E8", "PPU_EMIT_299", "PPU_EMIT_26D",
++        "PPU_FRAME_BEGIN", "PPU_SM", "VDEC_AU", "VDEC_BUSY",
++        "VDEC_GPI_EMPTY", "VDEC_GPI_OK", "VDEC_GETPIC", "PPU_VID_GP", "PPU_VID_A84Z",
++    };
++    return kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "UNKNOWN";
++}
++
++int ps3_l4f_on(void) {
++    int on = atomic_load_explicit(&s_l4f_enabled, memory_order_relaxed);
++    if (on < 0) {
++        int expected = -1;
++        int detected = getenv("GCM_L4F_TRACE") ? 1 : 0;
++        atomic_compare_exchange_strong_explicit(&s_l4f_enabled, &expected, detected, memory_order_relaxed, memory_order_relaxed);
++        on = atomic_load_explicit(&s_l4f_enabled, memory_order_relaxed);
++    }
++    return on;
++}
++
++void ps3_l4f_trace(uint32_t kind, uint32_t a, uint32_t b, uint32_t c) {
++    uint32_t n;
++    l4f_event* e;
++    if (!ps3_l4f_on()) return;
++    n = atomic_fetch_add_explicit(&s_l4f_index, 1, memory_order_relaxed);
++    e = &s_l4f_ring[n & (L4F_RING_SIZE - 1)];
++    atomic_store_explicit(&e->ms, (uint32_t)ps3_ms_now(), memory_order_relaxed);
++    atomic_store_explicit(&e->kind, kind, memory_order_relaxed);
++    atomic_store_explicit(&e->a, a, memory_order_relaxed);
++    atomic_store_explicit(&e->b, b, memory_order_relaxed);
++    atomic_store_explicit(&e->c, c, memory_order_relaxed);
++    atomic_store_explicit(&e->seq, n + 1, memory_order_release);
++}
++
++void ps3_l4f_dump(const char* why) {
++    uint32_t end, start, n;
++    if (!ps3_l4f_on() || atomic_fetch_add_explicit(&s_l4f_dumps, 1, memory_order_relaxed) >= 3) return;
++    end = atomic_load_explicit(&s_l4f_index, memory_order_acquire);
++    start = end > L4F_RING_SIZE ? end - L4F_RING_SIZE : 0;
++    fprintf(stderr, "[L4F] dump: %s\n", why ? why : "");
++    for (n = start; n != end; n++) {
++        l4f_event* e = &s_l4f_ring[n & (L4F_RING_SIZE - 1)];
++        uint32_t ms, kind, a, b, c;
++        if (atomic_load_explicit(&e->seq, memory_order_acquire) != n + 1) continue;
++        ms = atomic_load_explicit(&e->ms, memory_order_relaxed);
++        kind = atomic_load_explicit(&e->kind, memory_order_relaxed);
++        a = atomic_load_explicit(&e->a, memory_order_relaxed);
++        b = atomic_load_explicit(&e->b, memory_order_relaxed);
++        c = atomic_load_explicit(&e->c, memory_order_relaxed);
++        if (atomic_load_explicit(&e->seq, memory_order_acquire) != n + 1) continue;
++        fprintf(stderr, "[L4F] t=%u k=%s a=0x%08X b=0x%08X c=0x%08X\n", ms, l4f_kind_name(kind), a, b, c);
++    }
++}
+diff --git a/libs/video/l4f_trace.h b/libs/video/l4f_trace.h
+new file mode 100644
+index 00000000..f63c232c
+--- /dev/null
++++ b/libs/video/l4f_trace.h
+@@ -0,0 +1,34 @@
++#ifndef PS3_L4F_TRACE_H
++#define PS3_L4F_TRACE_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum {
++    RSX_REL_1D74,
++    RSX_REL_1D70,
++    SEM_REL_6C,
++    SEM_ACQ_BLOCK,
++    SEM_ACQ_PASS,
++    SET_REF,
++    PPU_WAIT_ENTER,
++    PPU_CLEAR,
++    PPU_FLAG_1BD8E8,
++    PPU_EMIT_299,
++    PPU_EMIT_26D,
++    PPU_FRAME_BEGIN,
++    PPU_SM,
++};
++
++int ps3_l4f_on(void);
++void ps3_l4f_trace(uint32_t kind, uint32_t a, uint32_t b, uint32_t c);
++void ps3_l4f_dump(const char* why);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/runtime/platform/switch_srw.c b/runtime/platform/switch_srw.c
+new file mode 100644
+index 00000000..2948ccfd
+--- /dev/null
++++ b/runtime/platform/switch_srw.c
+@@ -0,0 +1,58 @@
++/* 80c: Win32 SRW locks on libnx RwLock (see win32_compat.h). */
++#if defined(__SWITCH__)
++
++#include <switch.h>
++#include <stdlib.h>
++
++void* ps3_nx_rwl_new(void)
++{
++    RwLock* r = (RwLock*)calloc(1, sizeof(*r));
++
++    if (r)
++        rwlockInit(r);
++
++    return r;
++}
++
++void ps3_nx_wlock(void* r)
++{
++    int i;
++
++    for (i = 0; i < 256; ++i)
++    {
++        if (rwlockTryWriteLock((RwLock*)r))
++            return;
++
++        if (i != 255)
++            __asm__ __volatile__("yield" ::: "memory");
++    }
++
++    rwlockWriteLock((RwLock*)r);
++}
++
++void ps3_nx_wunlock(void* r)
++{
++    rwlockWriteUnlock((RwLock*)r);
++}
++
++int ps3_nx_trywlock(void* r)
++{
++    return rwlockTryWriteLock((RwLock*)r);
++}
++
++void ps3_nx_rlock(void* r)
++{
++    rwlockReadLock((RwLock*)r);
++}
++
++void ps3_nx_runlock(void* r)
++{
++    rwlockReadUnlock((RwLock*)r);
++}
++
++int ps3_nx_tryrlock(void* r)
++{
++    return rwlockTryReadLock((RwLock*)r);
++}
++
++#endif

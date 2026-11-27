@@ -38,6 +38,7 @@ set(RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ppu" CACHE PATH "")
 if(NINTENDO_SWITCH OR CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     include_directories(SYSTEM "${NX_DIR}/compat/include")
     include_directories("${NX_DIR}/compat")
+    include_directories("${NX_DIR}/include")   # 62a: devkitnx autotest.h
     include_directories(SYSTEM "$ENV{DEVKITPRO}/portlibs/switch/include")
     add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-include nx_compat.h>")
     add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>)

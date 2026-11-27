@@ -2,7 +2,25 @@
 
 Lo más nuevo arriba. Todas las pruebas son en consola por nxlink. Las mediciones marcadas **OC** son con overclock; la meta (30 FPS) se mide sin OC.
 
-## ⏸️ Pausa hasta la próxima semana
+## 2026-11-27 — llega al menú principal sin cuelgues (~315 ms/flip, OC)
+- **El "cuelgue" del label 0x4F0 era un falso positivo.** En `cellGcmSys.c` (bloque NV406E 0x68) el timer de
+  `GCM_SEMA_ACQUIRE_MS` solo se reiniciaba al rendirse y no al pasar: el bloqueo siguiente contaba desde uno viejo y se
+  rendía en el acto. Los flips nunca se paraban. **Fix:** el timer se reinicia cuando el acquire pasa.
+- **Revertido** el parche de prueba que forzaba el CLEAR del semáforo en el lift del PPU: ya no hace falta.
+- **Benches (OC 1785/921):** con el fix y también con espera infinita (sin `_MS`), 0 rendiciones, **2.351 y 2.424 flips
+  sin cuelgue** (antes se colgaba en el ~1.484) y llega al **menú principal a 307-318 ms/flip** (~3,2 FPS).
+- **EDGE identificado:** los jobs de geometría EDGE son los relocables `rjm_434600` (imagen 306, la que corre en el
+  menú) y `rjm_459100` (312, con un bloque extra de culling de triángulos), como las dos builds de EDGE de
+  [Ascension-R](https://github.com/rigaz29/Ascension-R). En el menú el main espera a EDGE el ~36 % del frame; cada
+  worker 8-10 usa ~19 % de un hilo y los 3 núcleos van al 88-99 %.
+- **Hallazgo:** en Switch **ningún hilo tiene prioridad propia**: `apply_priority` (`win32_compat.c`) no hace nada en
+  Switch, así que el `TIME_CRITICAL` del audio y el `ABOVE_NORMAL` del PPU no se aplican.
+- **Descartado:** `SPURS_IDLE_MAX=1` (más sondeo: 375 ms/flip, peor).
+- **Pendiente:** líneas finas punteadas en grilla sobre la imagen del menú (artefacto de render).
+- **Próximo paso:** A/B de prioridades selectivas para los workers de SPURS (audio y EDGE); si no baja la espera del
+  main, re-liftar EDGE (`--merge-chunks`) y después HLE nativo NEON de sus funciones calientes.
+
+## 2026-11-13 — pausa (ya terminada) y plan de esa semana
 El desarrollo se frena unos días: **se me acabaron los tokens de la IA con la que trabajo el port y se renuevan la
 semana que viene.** El estado de abajo es exactamente donde quedó; se retoma desde el punto 1 del plan.
 
