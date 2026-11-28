@@ -8,6 +8,14 @@ Lo más nuevo arriba. Todas las pruebas son en consola por nxlink. Las medicione
 - Perfil del worker EDGE con la build 131: ya no duerme en el DMA; 36 % bloqueado en mutex (el de los atómicos y el del directorio), 30 % ocioso en condvar, ~1/3 de trabajo real. Los 3 núcleos van casi llenos (~2,7-2,9).
 - Descartado: el mismo giro en los RwLock (`SRW_SPIN_NS=100000`: 1078 ms, peor; la perilla queda apagada).
 
+### Capturas (consola, sin OC, sacadas solas por el bench con sys-botbase)
+Cinemáticas con el motor del juego y un momento jugando. Las rayas punteadas del cielo ya estaban antes; todavía están por arreglar.
+
+![Cinemática: primer plano de Kratos](docs/img/cinematica_kratos_2026-11-28.jpg)
+![Cinemática: Kratos con la Espada del Olimpo](docs/img/cinematica_espada_olimpo_2026-11-28.jpg)
+![Cinemática: Kratos con la Espada del Olimpo (otra toma)](docs/img/cinematica_espada_olimpo_2_2026-11-28.jpg)
+![Jugando: soldados en el primer nivel](docs/img/jugando_soldados_2026-11-28.jpg)
+
 ### Próximos pasos (en orden)
 1. **Confirmar la build 134** (giro de 100 µs) con dos corridas más; probar 50 y 200 µs.
 2. **Menos peleas por el mutex de los atómicos:** hoy hay un único mutex para todas las líneas de 128 B. Partirlo por línea (stripes) o sacar del camino los sondeos con GETLLAR del policy module de WWS.
