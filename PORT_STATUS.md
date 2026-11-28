@@ -2,6 +2,22 @@
 
 Lo más nuevo arriba. Todas las pruebas son en consola por nxlink. Las mediciones marcadas **OC** son con overclock; la meta (30 FPS) se mide sin OC.
 
+## 2026-11-28 (tarde) — ~0,71 s por cuadro (sin OC), cierre de la semana
+- **Giro antes de bloquear en el mutex de los atómicos de SPU** (`spu_lockline_lock`, GETLLAR/PUTLLC): en Horizon dormir en el kernel (`svcArbitrateLock`) cuesta mucho más que girar. Barrido (cuadros 3600-3780, `SPU_LOCKLINE_SPIN_NS`): 2 µs → 1489 ms, 20 µs (el de antes) → 881 ms, **100 µs → 710 ms (−19 %)**, 1 ms → 1220 ms. Queda 100 µs por defecto. *Una sola corrida a 100 µs: falta confirmarla con otra.*
+- **Directorio de policy modules sin lock global** (`spurs_policy.c`): contadores atómicos, el lock solo se toma si se está retirando un workload. −3 % (881 contra 911 ms).
+- Perfil del worker EDGE con la build 131: ya no duerme en el DMA; 36 % bloqueado en mutex (el de los atómicos y el del directorio), 30 % ocioso en condvar, ~1/3 de trabajo real. Los 3 núcleos van casi llenos (~2,7-2,9).
+- Descartado: el mismo giro en los RwLock (`SRW_SPIN_NS=100000`: 1078 ms, peor; la perilla queda apagada).
+
+### Próximos pasos (en orden)
+1. **Confirmar la build 134** (giro de 100 µs) con dos corridas más; probar 50 y 200 µs.
+2. **Menos peleas por el mutex de los atómicos:** hoy hay un único mutex para todas las líneas de 128 B. Partirlo por línea (stripes) o sacar del camino los sondeos con GETLLAR del policy module de WWS.
+3. **Hilo del RSX:** pasa ~44 % del tiempo en Vulkan (cada `vkQueueSubmit` ~3,7 ms, espera de fences ~5,8 ms por flush, ~67 flushes por cuadro). Ver si `queue_mu` choca con el present y juntar los flushes "de ocioso".
+4. **Registro por draw de EDGE:** encontrar quién escribe la palabra 3 (`0x7012E510..E580`) con `PPU_WWATCH`. Hoy `EDGE_REC_SKIP` toma el camino del tope del propio job. Revisar la imagen en más escenas.
+5. **Lifter SPU con registros en variables C**, bien hecho: sin volcar registros alrededor de los accesos al LS, solo en salidas, llamadas y canales. Recién cuando EDGE quede limitado por cálculo.
+6. Liftear los fragmentos que todavía corren interpretados (img 0x132 LS 0x7C00/0x5C00; PM de WWS 0x17400/0x9C00/0x17800).
+7. A largo plazo: EDGE → GPU (skinning y transformación en vertex shader).
+- Herramienta: la primera conexión a sys-botbase a veces da timeout; agregar un reintento automático al runner de devkitnx.
+
 ## 2026-11-28 — jugable en el primer nivel: de ~2,1 s a 0,91 s por cuadro (sin OC)
 - Mediciones con relojes de fábrica, cuadros 3600-3780 del bench (jugando, Kratos con la Espada del Olimpo bien dibujado). Sigue muy lejos de 30 FPS (~1,1 FPS).
 - **EDGE en 3 SPU a la vez:** se perdía el 9.º argumento `maxContention` de `_cellSpursWorkloadAttributeInitialize` (va en la pila, SP+0x70), así que cada lista de jobs corría en una sola SPU. Ahora se respeta, con tope 3 (`SPURS_MAXCONT_CAP`). +60 %.
