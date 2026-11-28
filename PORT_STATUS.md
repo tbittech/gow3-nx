@@ -2,6 +2,15 @@
 
 Lo más nuevo arriba. Todas las pruebas son en consola por nxlink. Las mediciones marcadas **OC** son con overclock; la meta (30 FPS) se mide sin OC.
 
+## 2026-11-28 — jugable en el primer nivel: de ~2,1 s a 0,91 s por cuadro (sin OC)
+- Mediciones con relojes de fábrica, cuadros 3600-3780 del bench (jugando, Kratos con la Espada del Olimpo bien dibujado). Sigue muy lejos de 30 FPS (~1,1 FPS).
+- **EDGE en 3 SPU a la vez:** se perdía el 9.º argumento `maxContention` de `_cellSpursWorkloadAttributeInitialize` (va en la pila, SP+0x70), así que cada lista de jobs corría en una sola SPU. Ahora se respeta, con tope 3 (`SPURS_MAXCONT_CAP`). +60 %.
+- **Tail calls de SPU con GCC ≥ 15** (`musttail`): el lift de EDGE tiene ~925 funciones y antes cada salto volvía al trampolín.
+- **Sombras apagadas** (`GOW3_NO_SHADOWS`, def. 1) por el camino "apagado" del propio efecto.
+- **El job EDGE ya no se queda dormido en su registro por draw** (`EDGE_REC_SKIP`, def. 1): sondeaba un registro de 16 B hasta que la palabra 3 valiera 0, con un tope propio de 10000 sondeos (~5-10 ms en PS3); acá cada sondeo dormía, el tope nunca llegaba y cada espera duraba 3-45 ms. Ahora, pasados 256 sondeos, toma el mismo camino que en su tope. **−20 % por cuadro** (1139 → 911 ms).
+- Descartado: worker que elige solo su siguiente workload (con maxContention > 1 rompía la lista libre del allocator: doble free), espera por dirección en cada PUT de SPU (+29 % y cuelgue), 4 segmentos de Vulkan (igual).
+- Lo que sigue: el hilo del RSX pasa ~44 % del tiempo en Vulkan (submit + fences), y EDGE sigue siendo ~2 núcleos.
+
 ## 2026-11-27 — llega al menú principal sin cuelgues (~315 ms/flip, OC)
 - **El "cuelgue" del label 0x4F0 era un falso positivo.** En `cellGcmSys.c` (bloque NV406E 0x68) el timer de
   `GCM_SEMA_ACQUIRE_MS` solo se reiniciaba al rendirse y no al pasar: el bloqueo siguiente contaba desde uno viejo y se

@@ -102,6 +102,7 @@ uint8_t* vm_base = nullptr;
 int g_gow3_disable_mlaa = 0;   /* 50a: read by func_00230DC4 (ppu_recomp_004.cpp) */
 extern "C" { int g_gow3_skip_intro = 0;  /* 68a: func_001E5440 (ppu_recomp_003.cpp) */
              int g_gow3_skip_videos = 0; /* 68b: func_0026FCCC (ppu_recomp_004.cpp) */ }
+extern "C" { int g_gow3_no_dof = 0, g_gow3_no_mblur = 0, g_gow3_no_fog = 0, g_gow3_no_shadows = 0; } /* 117: ppu_recomp_003/005.cpp */
 extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
 
 /* Guest-callback dispatch. g_ps3_guest_caller is the hook the HLE runtime
@@ -481,6 +482,10 @@ static void env_file_load(void)
 static void title_environment(void)
 {
     env_file_load();
+    /* 117: play build: the samplers/stats/traces cost CPU; GOW3_DIAG=1 turns them back on (bench configs). */
+    const int diag = getenv("GOW3_DIAG") && atoi(getenv("GOW3_DIAG"));
+    env_default("SPURS_KERN_PRIO", "2");   /* 106: SPURS kernel +2: 4-6 %, mostly the p95 */
+    env_default("PPU_USLEEP_BACKOFF", "1000");   /* 123: main usleep(30) loop; 121u videos -20 % */
     env_default("GCM_FLIPCB_ONTICK", "1");
     env_default("GCM_PARK_GRACE_MS", "10000");
     env_default("GCM_FIFO_SEGMENT", "0x8000");
@@ -491,21 +496,26 @@ static void title_environment(void)
     env_default("SPU_MFC_LOOKUP_CACHE", "1");
     env_default("GCM_FLIPCOUNT", "1");
     env_default("GOW3_WATCHDOG", "20,45,90,150,240");
-    env_default("GOW3_PROF", "1,30");
-    env_default("SPU_INTERP_STATS", "30");   /* which SPU code runs in the interpreter */
-    env_default("SPU_PROF", "30");           /* 29a: [sprof] SPU-side host threads (spu_prof.h) */
+    if (diag) env_default("GOW3_PROF", "1,30");
+    if (diag) env_default("SPU_INTERP_STATS", "30");   /* which SPU code runs in the interpreter */
+    if (diag) env_default("SPU_PROF", "30");           /* 29a: [sprof] SPU-side host threads (spu_prof.h) */
+    /* 110: the EDGE job managers (wid 8-10, serial chain) stay in for 2 ms after their
+     * first poll instead of leaving after every job: 289/334 -> 251/306 ms/flip, main
+     * waiting on EDGE 31% -> 3%. 500 us: 260/312; 5000 us starves vblank (62 -> 41 Hz). */
+    env_default("SPURS_POLL_CUR_WIDS", "8,9,10");
+    env_default("SPURS_POLL_CUR_US", "2000");
     /* 29b: SPURS_POLL_CUR (poll answers wklCurrentId) is off: the 30th run showed
      * the same fps with it and more host CPU spent in the Little worker. */
-    env_default("VDEC_PICLOG", "1");         /* 30a: placeholder pictures handed out vs AUs */
-    env_default("SPU_FLOATFIX_STATS", "1");  /* 38a: why float lanes fall to the cold scalar fix-ups (prints every 2^24) */
+    if (diag) env_default("VDEC_PICLOG", "1");         /* 30a: placeholder pictures handed out vs AUs */
+    if (diag) env_default("SPU_FLOATFIX_STATS", "1");  /* 38a: why float lanes fall to the cold scalar fix-ups (prints every 2^24) */
     /* 50b removed (52): GOW3_NO_COLORGRADE=1 hung the 41st run at 51 s (PPU stuck at lr 0x26D3D0). */
     env_default("GOW3_LUT_CACHE", "1");      /* 52b: cache of the grading LUT call (rjm_42d900 0x6E5C -> 0x6860), self-checked every 128 hits */
-    env_default("GOW3_LUT_DIAG", "1");       /* 52b: [lutc] hits/misses/bad every 10 s */
+    if (diag) env_default("GOW3_LUT_DIAG", "1");       /* 52b: [lutc] hits/misses/bad every 10 s */
     /* 56a: who waits for whom per frame (ps3_ftrace.h), 12 s from t=160 s, dumped to
      * stderr as "@ft " lines for tools/ftrace_report.py. 1M spans = 32 MB. */
-    env_default("PS3_FTRACE", "160:12:-");
-    env_default("PS3_FTRACE_CAP", "1000000");
-    env_default("RSX_WALKER_PROF", "160:12");  /* 57a: sample the RSX FIFO walker thread (cellGcmSys.c), [wprof] lines */
+    if (diag) env_default("PS3_FTRACE", "160:12:-");
+    if (diag) env_default("PS3_FTRACE_CAP", "1000000");
+    if (diag) env_default("RSX_WALKER_PROF", "160:12");  /* 57a: sample the RSX FIFO walker thread (cellGcmSys.c), [wprof] lines */
     env_default("VK_DRAW_BATCH", "1");         /* 58a: 45ª showed submit+wait per draw (~90% of the RSX thread); batch up to 512 draws per submission */
 #ifdef __SWITCH__
     /* The game's own vertex/fragment programs through glslang (HLSL -> SPIR-V),
@@ -698,6 +708,15 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    /* 117: RPCS3 1.00 cuts (lwz r0,16(rX) -> li r0,0 in the lifted code): DoF 0x1c13c8,
+     * motion blur 0x1c5700, layered fog 0x296994/0x296ad8. On unless GOW3_NO_*=0. */
+    {
+        const char* d = getenv("GOW3_NO_DOF"); const char* b = getenv("GOW3_NO_MBLUR"); const char* f = getenv("GOW3_NO_FOG");
+        g_gow3_no_dof = d ? atoi(d) : 1; g_gow3_no_mblur = b ? atoi(b) : 1; g_gow3_no_fog = f ? atoi(f) : 1;
+        /* 124: shadows FX update 0x29b788 (same lwz r0,16 enable read as DoF); GOW3_NO_SHADOWS=0 keeps them */
+        { const char* sh = getenv("GOW3_NO_SHADOWS"); g_gow3_no_shadows = sh ? atoi(sh) : 1; }
+        printf("[patch] DoF off %d, motion blur off %d, layered fog off %d, shadows off %d\n", g_gow3_no_dof, g_gow3_no_mblur, g_gow3_no_fog, g_gow3_no_shadows);
+    }
     /* 50a: RPCS3 "Disable MLAA" v3.0 for GoW3 1.00 (illusion, ZEROx): the
      * title's MLAA switch is the byte at 0x52BF2F (1 -> 0), and the bl at
      * 0x231248 (func_00230DC4, lr 0x0023124C) is skipped in the lifted code

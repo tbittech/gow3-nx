@@ -46,7 +46,7 @@ index b975293d..4cc35604 100644
  }
  
 diff --git a/libs/codec/cellVdec.c b/libs/codec/cellVdec.c
-index 7e222c92..b9b8a9c9 100644
+index 7e222c92..f6a71437 100644
 --- a/libs/codec/cellVdec.c
 +++ b/libs/codec/cellVdec.c
 @@ -30,6 +30,9 @@ static u64 vdec_now_ms(void) { return (u64)GetTickCount64(); }
@@ -77,7 +77,16 @@ index 7e222c92..b9b8a9c9 100644
      /* Decoder path: NULL when there is no libavcodec, and then nothing
       * below is used. */
      VdecFf* ff;
-@@ -125,7 +130,7 @@ static void vdec_queue_clear(VdecSlot* v)
+@@ -83,6 +88,8 @@ typedef struct {
+ } VdecSlot;
+ 
+ static VdecSlot s_vdec[MAX_VDEC];
++/* AT_CROSS_VDEC: bench helper counters, read by cellPad.c */
++volatile int g_vdec_opens, g_vdec_closes;
+ 
+ /* The handle the guest sees is the slot index plus one, never 0: some
+  * titles treat a 0 handle as "no decoder open".
+@@ -125,7 +132,7 @@ static void vdec_queue_clear(VdecSlot* v)
  static void vdec_on_picture(void* ctx, const VdecFfPicture* pic)
  {
      VdecSlot* v = (VdecSlot*)ctx;
@@ -86,7 +95,23 @@ index 7e222c92..b9b8a9c9 100644
          printf("[cellVdec] picture queue full; dropping the oldest\n");
          free(v->queue[v->qHead].yuv);
          v->qHead = (v->qHead + 1) % VDEC_QUEUE;
-@@ -350,6 +355,11 @@ s32 cellVdecStartSeq(CellVdecHandle handle)
+@@ -295,6 +302,7 @@ s32 cellVdecOpen(const CellVdecType* type, const CellVdecResource* res,
+             VDEC_UNLOCK();
+             vm_write32((u32)(uintptr_t)handle, (u32)VDEC_HANDLE_OF(i));
+             printf("[cellVdec] Open -> handle=%u\n", (u32)VDEC_HANDLE_OF(i));
++            __atomic_add_fetch(&g_vdec_opens, 1, __ATOMIC_SEQ_CST);
+             if (s_vdec[i].ff) {
+                 printf("[cellVdec] decoding with libavcodec\n");
+                 vdec_idle_thread_start();
+@@ -328,6 +336,7 @@ s32 cellVdecClose(CellVdecHandle handle)
+ 
+     if (handle >= MAX_VDEC || !s_vdec[handle].in_use)
+         return (s32)CELL_VDEC_ERROR_ARG;
++    __atomic_add_fetch(&g_vdec_closes, 1, __ATOMIC_SEQ_CST);
+ 
+     VDEC_LOCK();
+     if (s_vdec[handle].ff) {
+@@ -350,6 +359,11 @@ s32 cellVdecStartSeq(CellVdecHandle handle)
  
      VDEC_LOCK();
      s_vdec[handle].seqStarted = 1;
@@ -98,7 +123,7 @@ index 7e222c92..b9b8a9c9 100644
      if (s_vdec[handle].ff) {
          /* A new sequence: nothing from the last one is shown. */
          vdec_ff_reset(s_vdec[handle].ff);
-@@ -425,7 +435,9 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+@@ -425,7 +439,9 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
      if (v->ff) {
          VDEC_LOCK();
          if (v->qCount >= VDEC_BUSY_AT) {
@@ -108,7 +133,7 @@ index 7e222c92..b9b8a9c9 100644
              return (s32)CELL_VDEC_ERROR_BUSY;  /* title must take pictures */
          }
          v->auCount++;
-@@ -436,7 +448,9 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+@@ -436,7 +452,9 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
                             vdec_on_picture, v);
          v->lastAuMs = vdec_now_ms();
          v->idleDrained = 0;
@@ -119,7 +144,7 @@ index 7e222c92..b9b8a9c9 100644
          vdec_notify(handle, CELL_VDEC_MSG_TYPE_AUDONE, CELL_OK);
          vdec_notify_new_pics(handle);
          return CELL_OK;
-@@ -451,19 +465,67 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+@@ -451,19 +469,67 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
       * picture. Games that only check for completion (not pixel data) will
       * proceed correctly. */
      v->auCount++;
@@ -189,7 +214,7 @@ index 7e222c92..b9b8a9c9 100644
  
      vdec_notify(handle, CELL_VDEC_MSG_TYPE_PICOUT, CELL_OK);
  
-@@ -559,20 +621,38 @@ s32 cellVdecGetPicItem(CellVdecHandle handle, const CellVdecPicItem** picItem)
+@@ -559,20 +625,38 @@ s32 cellVdecGetPicItem(CellVdecHandle handle, const CellVdecPicItem** picItem)
      if (v->ff) {
          VDEC_LOCK();
          if (!v->qCount) {
@@ -231,7 +256,7 @@ index 7e222c92..b9b8a9c9 100644
      return CELL_OK;
  }
  
-@@ -617,18 +697,28 @@ s32 cellVdecGetPicture(CellVdecHandle handle, const void* format, void* outBuff)
+@@ -617,18 +701,28 @@ s32 cellVdecGetPicture(CellVdecHandle handle, const void* format, void* outBuff)
          VDEC_LOCK();
          s32 rc = vdec_take_picture(v, dst, vm_read32(fmt_ea + 0),
                                     vm_read32(fmt_ea + 4), vm_read8(fmt_ea + 8));
@@ -264,7 +289,7 @@ index 7e222c92..b9b8a9c9 100644
      u32 rowlen;
      switch (type) {
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 5f8a2fa2..1f900920 100644
+index 5f8a2fa2..20280024 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -708,6 +708,19 @@ static void pad_poll_sdl2(void)
@@ -287,7 +312,7 @@ index 5f8a2fa2..1f900920 100644
  }
  
  static void pad_init_backend(void)
-@@ -776,6 +789,73 @@ static unsigned long long pad_now_ms(void)
+@@ -776,6 +789,109 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -312,6 +337,16 @@ index 5f8a2fa2..1f900920 100644
 +};
 +#define AT_MAP_N ((int)(sizeof s_at_map / sizeof s_at_map[0]))
 +
++extern volatile int g_vdec_opens, g_vdec_closes;
++/* AT_CROSS_VDEC: when the menu started (CLOCK_MONOTONIC ns); read by cellGcmSys.c. */
++volatile unsigned long long g_at_menu_ns;
++static unsigned long long at_now_ns(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (unsigned long long)ts.tv_sec * 1000000000ULL + (unsigned long long)ts.tv_nsec;
++}
++
 +static void pad_autotest_p1(PadHostState* hs)
 +{
 +    static int dpad_as_stick = -1;
@@ -321,7 +356,33 @@ index 5f8a2fa2..1f900920 100644
 +        const char* e = getenv("GOW3_AT_DPAD_AS_STICK");
 +        dpad_as_stick = (e && *e == '0') ? 0 : 1;
 +    }
++    /* AT_CROSS_VDEC=1 (bench): pulse CROSS (600 ms every 1.5 s) between the
++     * end of the 1st video and the start of the 2nd (GoW3's brightness screen
++     * shows up there at a variable time); mark "menu" when the 2nd one ends. */
++    static int cross_vdec = -1, menu_sent, cross_started, cross_stopped;
++    uint64_t extra = 0;
++    if (cross_vdec < 0) {
++        const char* e = getenv("AT_CROSS_VDEC");
++        cross_vdec = e ? atoi(e) : 0;
++    }
++    /* AT_CROSS_VDEC=2: also enter the game: from menu+10 s to menu+70 s pulse
++     * CROSS (600 ms every 3 s) through New Game, difficulty and confirmations. */
++    if (cross_vdec >= 2 && menu_sent) {
++        const unsigned long long dt = (at_now_ns() - g_at_menu_ns) / 1000000ULL;
++        if (dt >= 10000ULL && dt < 70000ULL && dt % 3000ULL < 600ULL) extra = 1u << 1;
++    }
++    if (cross_vdec) {
++        const int win = g_vdec_closes >= 1 && g_vdec_opens < 2;
++        if (win && (at_now_ns() / 1000000ULL) % 1500ULL < 600ULL) extra = 1u << 1;
++        if (extra && !cross_started) { cross_started = 1; printf("[at-cross] pressing CROSS until vdec open #2\n"); }
++        if (cross_started && !win && !cross_stopped) {
++            cross_stopped = 1;
++            printf("[at-cross] stop: opens=%d closes=%d\n", g_vdec_opens, g_vdec_closes);
++        }
++        if (g_vdec_closes >= 2 && !menu_sent) { menu_sent = 1; g_at_menu_ns = at_now_ns(); at_mark("menu"); }
++    }
 +    if (at_input(&scripted)) {
++        scripted |= extra;
 +        u16 b = 0;
 +        for (i = 0; i < AT_MAP_N; i++) if (scripted & s_at_map[i].hid) b |= s_at_map[i].cell;
 +        hs->connected = 1;
@@ -361,7 +422,7 @@ index 5f8a2fa2..1f900920 100644
  static void pad_poll_backend(void)
  {
      static unsigned long long s_last_ms = 0;
-@@ -794,6 +874,9 @@ static void pad_poll_backend(void)
+@@ -794,6 +910,9 @@ static void pad_poll_backend(void)
      pad_poll_sdl2();
  #endif
      if (!s_host_state[0].connected) pad_poll_keyboard();
@@ -372,18 +433,19 @@ index 5f8a2fa2..1f900920 100644
      pad_unlock();
  }
 diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
-index b09220e2..8a477b83 100644
+index b09220e2..d6a037c6 100644
 --- a/libs/spurs/cellSpurs.c
 +++ b/libs/spurs/cellSpurs.c
-@@ -21,6 +21,7 @@
+@@ -21,6 +21,8 @@
  #include <string.h>
  #include <stdint.h>
  #include "ps3emu/log_first.h"
 +#include "ps3emu/spu_prof.h"
++#include "../../runtime/ppu/ppu_context.h"   /* 124: the ctx handler for the 9th argument */
  
  /* Bridge the real (BE) taskset EA + selected taskId from CreateTask to the image-22
   * SPU dispatch (spu_workload.c), so spurs_pm_build_context can build the leaf's
-@@ -466,6 +467,11 @@ struct SpursPmSlot {
+@@ -466,6 +468,11 @@ struct SpursPmSlot {
      const uint8_t* pm;
      u64 data;
      HANDLE thread;
@@ -395,7 +457,7 @@ index b09220e2..8a477b83 100644
  };
  static struct SpursInst {
      u32 ea, nspus;
-@@ -473,6 +479,7 @@ static struct SpursInst {
+@@ -473,6 +480,7 @@ static struct SpursInst {
      int kernel_live, stopping, starting;
      int kick;   /* an SPU committed the request line since the coordinator last looked */
      SRWLOCK lock;
@@ -403,7 +465,7 @@ index b09220e2..8a477b83 100644
      CONDITION_VARIABLE wake;
      HANDLE coordinator;
      struct SpursPmSlot slots[6];
-@@ -575,11 +582,13 @@ static s32 spurs_api_lock(u32 ea, struct SpursInst** out)
+@@ -575,11 +583,13 @@ static s32 spurs_api_lock(u32 ea, struct SpursInst** out)
          return CELL_SPURS_CORE_ERROR_BUSY;
      }
      AcquireSRWLockExclusive(&s_workload_registry_lock);
@@ -417,7 +479,7 @@ index b09220e2..8a477b83 100644
      ReleaseSRWLockExclusive(&s_workload_registry_lock);
      WakeAllConditionVariable(&si->wake);
      ReleaseSRWLockExclusive(&si->lock);
-@@ -1491,10 +1500,18 @@ s32 cellSpursCreateTask2(CellSpursTaskset* taskset, u64 id_ea, u64 elf_ea,
+@@ -1491,10 +1501,18 @@ s32 cellSpursCreateTask2(CellSpursTaskset* taskset, u64 id_ea, u64 elf_ea,
          context_ea    = (u32)vm_read64((u32)attr_ea + TASK2ATTR_EA_CTX);
          ls_pattern_ea = (u32)attr_ea + TASK2ATTR_LS_PAT;
      }
@@ -436,7 +498,289 @@ index b09220e2..8a477b83 100644
      return rc;
  }
  
-@@ -1992,17 +2009,28 @@ static DWORD WINAPI spurs_pm_worker(LPVOID p)
+@@ -1823,13 +1841,48 @@ s32 _cellSpursWorkloadFlagReceiver(u64 spurs_ea, u32 wid, u32 is_set)
+     return rc;
+ }
+ 
+-/* The SDK-versioned workload-attribute initializer (the import the game links;
+- * NID differs from the non-underscore inline wrapper). Args arrive raw in
+- * r3..r10; writes the REAL BE layout so AddWorkloadWithAttribute round-trips. */
+-s32 _cellSpursWorkloadAttributeInitialize(u64 attr_ea, u32 revision, u32 sdkVersion,
+-                                          u64 pm_ea, u32 size, u64 data,
+-                                          u64 prio_ea, u32 minContention)
++/* 124: the 9th argument, maxContention, from SP+0x70 (SPURS_TITLE_MAXCONT, SPURS_MAXCONT_CAP). */
++static SRWLOCK s_spurs_title_maxcont_lock = SRWLOCK_INIT;
++static int s_spurs_title_maxcont_enabled = -1;
++static u32 s_spurs_title_maxcont_cap;
++
++static void spurs_title_maxcont_config(u32* cap)
++{
++    AcquireSRWLockExclusive(&s_spurs_title_maxcont_lock);
++    if (s_spurs_title_maxcont_enabled < 0) {
++        const char* title_env = getenv("SPURS_TITLE_MAXCONT");
++        const char* cap_env = getenv("SPURS_MAXCONT_CAP");
++        unsigned long value = cap_env ? strtoul(cap_env, NULL, 0) : 3;
++
++        if (value < 1) value = 1;
++        if (value > 8) value = 8;
++        s_spurs_title_maxcont_cap = (u32)value;
++        s_spurs_title_maxcont_enabled =
++            !(title_env && strcmp(title_env, "0") == 0);
++
++        if (s_spurs_title_maxcont_enabled)
++            printf("[spurs] title maxContention on, cap %u\n",
++                   s_spurs_title_maxcont_cap);
++        else
++            printf("[spurs] title maxContention off\n");
++    }
++    *cap = s_spurs_title_maxcont_cap;
++    ReleaseSRWLockExclusive(&s_spurs_title_maxcont_lock);
++}
++
++static s32 spurs_workload_attr_init(u64 attr_ea, u32 revision, u32 sdkVersion,
++                                    u64 pm_ea, u32 size, u64 data,
++                                    u64 prio_ea, u32 minContention,
++                                    u32 title_maxcontention)
+ {
++    u32 cap;
++    spurs_title_maxcont_config(&cap);
++
++    u32 title_maxc = title_maxcontention ? title_maxcontention : 1;
++    u32 maxcontention = s_spurs_title_maxcont_enabled
++        ? (title_maxc < cap ? title_maxc : cap)
++        : 1;
++
+     if (!attr_ea) return CELL_SPURS_CORE_ERROR_NULL_POINTER;
+     vm_write32((u32)attr_ea + WKATTR_REVISION,   revision);
+     vm_write32((u32)attr_ea + WKATTR_SDKVERSION, sdkVersion);
+@@ -1840,16 +1893,46 @@ s32 _cellSpursWorkloadAttributeInitialize(u64 attr_ea, u32 revision, u32 sdkVers
+         *(vm_base + (u32)attr_ea + WKATTR_PRIORITY + i) =
+             prio_ea ? *(vm_base + (u32)prio_ea + i) : 0;
+     vm_write32((u32)attr_ea + WKATTR_MIN_CONT, minContention);
+-    vm_write32((u32)attr_ea + WKATTR_MAX_CONT, 1);   /* 9th arg is beyond the 8-GPR adapter */
++    vm_write32((u32)attr_ea + WKATTR_MAX_CONT, maxcontention);
+     vm_write32((u32)attr_ea + WKATTR_NAME_CLASS, 0);
+     vm_write32((u32)attr_ea + WKATTR_NAME_INST,  0);
+-    vm_write32((u32)attr_ea + WKATTR_HOOK,     0);
+-    vm_write32((u32)attr_ea + WKATTR_HOOK_ARG, 0);
+-    printf("[cellSpurs] _WorkloadAttributeInitialize(attr=0x%08X pm=0x%08X size=%u data=0x%llX minC=%u)\n",
+-           (u32)attr_ea, (u32)pm_ea, size, (unsigned long long)data, minContention);
++    vm_write32((u32)attr_ea + WKATTR_HOOK,       0);
++    vm_write32((u32)attr_ea + WKATTR_HOOK_ARG,   0);
++    printf("[cellSpurs] _WorkloadAttributeInitialize(attr=0x%08X pm=0x%08X size=%u data=0x%llX minC=%u maxC=%u (title %u))\n",
++           (u32)attr_ea, (u32)pm_ea, size, (unsigned long long)data,
++           minContention, maxcontention, title_maxcontention);
+     return CELL_OK;
+ }
+ 
++s32 _cellSpursWorkloadAttributeInitialize(u64 attr_ea, u32 revision, u32 sdkVersion,
++                                          u64 pm_ea, u32 size, u64 data,
++                                          u64 prio_ea, u32 minContention)
++{
++    return spurs_workload_attr_init(attr_ea, revision, sdkVersion, pm_ea, size,
++                                    data, prio_ea, minContention, 1);
++}
++
++static void hle_spurs_workload_attr_init(ppu_context* ctx)
++{
++    const u32 maxcontention =
++        (u32)vm_read64((u32)ctx->gpr[1] + 0x70);
++
++    ctx->gpr[3] = (u64)(s64)spurs_workload_attr_init(
++        ctx->gpr[3], (u32)ctx->gpr[4], (u32)ctx->gpr[5],
++        ctx->gpr[6], (u32)ctx->gpr[7], ctx->gpr[8], ctx->gpr[9],
++        (u32)ctx->gpr[10], maxcontention);
++}
++
++extern void ps3_hle_register_ctx(uint32_t nid, const char* name,
++                                 void (*fn)(ppu_context*));
++
++void cellSpurs_register_ctx_handlers(void)
++{
++    ps3_hle_register_ctx(0xEFEB2679u,
++                         "_cellSpursWorkloadAttributeInitialize",
++                         hle_spurs_workload_attr_init);
++}
++
+ s32 cellSpursWorkloadAttributeSetName(u64 attr_ea, u64 nameClass_ea, u64 nameInstance_ea)
+ {
+     if (!attr_ea) return CELL_SPURS_CORE_ERROR_NULL_POINTER;
+@@ -1983,37 +2066,318 @@ static u32 spurs_idle_max(void)
+  * occupies only its own slot; a later runnable producer can use another slot.
+  * Admission and lifecycle state are serialized per instance. Guest execution
+  * never runs under that lock, and only a genuine return releases contention. */
++/* 104: per-thread priorities on Switch (apply_priority is a no-op there).
++ * SPURS_WID_PRIO="wid:boost,..." raises a pm worker by <boost> levels while it
++ * runs that wid; SPURS_KERN_PRIO=<boost> raises the kernel thread. Max 8. */
++#ifdef __SWITCH__
++extern uint32_t svcGetThreadPriority(int32_t* out, uint32_t handle);
++extern uint32_t svcSetThreadPriority(uint32_t handle, uint32_t priority);
++#endif
++
++static u8 s_wid_boost[16];
++static int s_kern_boost;
++
++#ifdef __SWITCH__
++static volatile int s_prio_cfg_state;
++static volatile int s_pm_prio_logged;
++static volatile int s_kernel_prio_logged;
++
++static const char* spurs_prio_parse_num(const char* p, unsigned* value)
++{
++    unsigned n = 0;
++    if (*p < '0' || *p > '9')
++        return NULL;
++    do {
++        if (n < 1000)
++            n = n * 10 + (unsigned)(*p - '0');
++        ++p;
++    } while (*p >= '0' && *p <= '9');
++    *value = n;
++    return p;
++}
++
++static void spurs_prio_cfg(void)
++{
++    /* CAS, not test_and_set: TAS rewrote 1 over the final 2 and every later
++     * caller spun forever (104p4/104pe: SPURS kernel 0 passes, cores 100 %). */
++    if (__sync_val_compare_and_swap(&s_prio_cfg_state, 0, 1) != 0) {
++        while (s_prio_cfg_state == 1) {}
++        return;
++    }
++    const char* wid_env = getenv("SPURS_WID_PRIO");
++    const char* kern_env = getenv("SPURS_KERN_PRIO");
++    if (wid_env) {
++        const char* p = wid_env;
++        while (*p) {
++            unsigned wid, boost;
++            const char* q = spurs_prio_parse_num(p, &wid);
++            if (q && *q == ':')
++                q = spurs_prio_parse_num(q + 1, &boost);
++            else
++                q = NULL;
++            if (q && (*q == ',' || *q == '\0')) {
++                if (wid < 16)
++                    s_wid_boost[wid] = (u8)(boost > 8 ? 8 : boost);
++                p = *q == ',' ? q + 1 : q;
++            } else {
++                while (*p && *p != ',')
++                    ++p;
++                if (*p == ',')
++                    ++p;
++            }
++        }
++    }
++    if (kern_env) {
++        unsigned boost;
++        const char* end = spurs_prio_parse_num(kern_env, &boost);
++        if (end && *end == '\0')
++            s_kern_boost = (int)(boost > 8 ? 8 : boost);
++    }
++    if (wid_env || kern_env) {
++        char list[128] = "";
++        size_t used = 0;
++        for (unsigned i = 0; i < 16; ++i) {
++            if (s_wid_boost[i]) {
++                int n = snprintf(list + used, sizeof(list) - used, "%s%u:%u",
++                                 used ? "," : "", i, s_wid_boost[i]);
++                if (n > 0)
++                    used += (size_t)n;
++            }
++        }
++        fprintf(stderr, "[spurs-prio] wid=%s kern=%d\n", list, s_kern_boost);
++    }
++    __sync_synchronize();
++    s_prio_cfg_state = 2;
++}
++
++static int spurs_prio_base(void)
++{
++    int32_t priority;
++    if (svcGetThreadPriority(&priority, 0xFFFF8000u) != 0)
++        return -1;
++    return priority;
++}
++
++static void spurs_prio_set(int prio)
++{
++    if (prio >= 0x18 && prio <= 0x3F)
++        svcSetThreadPriority(0xFFFF8000u, (uint32_t)prio);
++}
++#else
++static void spurs_prio_cfg(void) {}
++static int spurs_prio_base(void) { return -1; }
++static void spurs_prio_set(int prio) { (void)prio; }
++#endif
++
++/* 124: the worker picks its next workload itself (SPURS_SELF_PICK, Codex). */
++static SRWLOCK s_spurs_self_pick_lock = SRWLOCK_INIT;
++static int s_spurs_self_pick_enabled = -1;
++
++static int spurs_self_pick_is_enabled(void)
++{
++    AcquireSRWLockExclusive(&s_spurs_self_pick_lock);
++    if (s_spurs_self_pick_enabled < 0) {
++        const char* env = getenv("SPURS_SELF_PICK");
++        s_spurs_self_pick_enabled = env && strcmp(env, "1") == 0;   /* 125: off by default (124m: heap free-list cycle with maxC 3 + self-pick) */
++        printf("[spurs] self-pick %s\n",
++               s_spurs_self_pick_enabled ? "on" : "off");
++    }
++    int enabled = s_spurs_self_pick_enabled;
++    ReleaseSRWLockExclusive(&s_spurs_self_pick_lock);
++    return enabled;
++}
++
++static void spurs_dispatch_slot(struct SpursInst* si, struct SpursPmSlot* slot,
++                                WklPm* pm, u32 wid, u32 ea,
++                                int kicked, int consume)
++{
++    if (consume) {
++        u32 ready;
++        u32 signal;
++
++        spu_lockline_lock();
++        ready = vm_read8(ea + wkl_ready_off(wid));
++        signal = vm_read16(ea + wkl_signal_off(wid));
++        if (ready)
++            vm_base[ea + wkl_ready_off(wid)] = (u8)(ready - 1);
++        if (signal & wkl_signal_bit(wid))
++            ef_w16(ea + wkl_signal_off(wid),
++                   (u16)(signal & ~wkl_signal_bit(wid)));
++        if (vm_read8(ea + SPURS_WKL_FLAG_RECV) == wid)
++            ef_w32(ea + SPURS_WKL_FLAG_WORD, 0xFFFFFFFFu);
++        ef_line_end(ea);
++    }
++
++    slot->fn = pm->fn;
++    slot->image_id = pm->image_id;
++    slot->pm = vm_base + (u32)(uintptr_t)s_workloads[wid].pm;
++    slot->pm_size = s_workloads[wid].sizePm;
++    slot->data = vm_read64(ea + wkl_info_off(wid) + 8);
++    slot->wid = wid;
++    slot->ea = ea;
++    si->active[wid]++;
++
++    spu_lockline_lock();
++    wkl_count_set(ea, SPURS_WKL_CURCONT, wid, si->is2, si->active[wid]);
++    ef_line_end(ea);
++
++    slot->t_busy_us = sprof_now_us();
++    sprof_kernel_dispatch(kicked);
++    slot->busy = 1;
++}
++
+ static DWORD WINAPI spurs_pm_worker(LPVOID p)
+ {
+     struct SpursPmSlot* slot = (struct SpursPmSlot*)p;
+     ps3_thread_name("spurs pm");
++    spurs_prio_cfg();
++    const int prio_base = spurs_prio_base();
++#ifdef __SWITCH__
++    if (__sync_lock_test_and_set(&s_pm_prio_logged, 1) == 0)
++        fprintf(stderr, "[spurs-prio] pm base=%d\n", prio_base);
++#endif
+     struct SpursInst* si = slot->instance;
+ #ifdef _WIN32
      { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }
  #endif
      ps3_tprof_thread('S', (uint32_t)slot->spu_num);
@@ -453,36 +797,163 @@ index b09220e2..8a477b83 100644
          ReleaseSRWLockExclusive(&si->lock);
 +        const uint64_t sp_t1 = sprof_now_us();
 +        sprof_set(SPROF_RUN, (uint32_t)slot->image_id);
++        if (slot->wid >= 8 && slot->wid <= 10) { extern void ps3_wprof_note_spu(void); ps3_wprof_note_spu(); }   /* 122 */
++        int boost = (prio_base >= 0 && slot->wid < 16) ? s_wid_boost[slot->wid] : 0;
++        if (boost) spurs_prio_set(prio_base - boost);
++        extern volatile int g_sprof_edge_run;   /* 123: EDGE wids running at once (sprof) */
++        const int sp_edge = slot->wid >= 8 && slot->wid <= 10;
++        if (sp_edge) __atomic_fetch_add(&g_sprof_edge_run, 1, __ATOMIC_RELAXED);
          spu_run_policy_module(slot->fn, slot->image_id, slot->pm, slot->pm_size,
                                slot->data, slot->wid, slot->ea, slot->spu_num);
++        if (sp_edge) __atomic_fetch_sub(&g_sprof_edge_run, 1, __ATOMIC_RELAXED);
++        if (boost) spurs_prio_set(prio_base);
          extern SPU_THREAD_LOCAL volatile unsigned g_spurs_pm_polls;
          unsigned polls = g_spurs_pm_polls;
 +        if (sp_t1) sprof_pm_run(slot->wid, sp_t1 - slot->t_busy_us, sprof_now_us() - sp_t1, polls);
 +        /* place 0x5C0n = si->lock after a run; n = holder when the wait began (80a) */
 +        sprof_set(SPROF_LOCK, 0x5C00u | ((u32)si->owner & 0xFu));
          AcquireSRWLockExclusive(&si->lock);
+-        u32 wid = slot->wid;
+-        if (si->active[wid]) si->active[wid]--;
 +        si->owner = 3;
 +        sprof_set(SPROF_DISPATCH, 0);
-         u32 wid = slot->wid;
-         if (si->active[wid]) si->active[wid]--;
++
++        u32 finished_wid = slot->wid;
++        if (si->active[finished_wid]) si->active[finished_wid]--;
          spu_lockline_lock();
-@@ -2014,6 +2042,7 @@ static DWORD WINAPI spurs_pm_worker(LPVOID p)
-         WakeAllConditionVariable(&si->wake);
+-        wkl_count_set(slot->ea, SPURS_WKL_CURCONT, wid, si->is2, si->active[wid]);
++        wkl_count_set(slot->ea, SPURS_WKL_CURCONT, finished_wid, si->is2,
++                      si->active[finished_wid]);
+         ef_line_end(slot->ea);
+-        if (polls) si->idle[wid] = 0;
+-        else if (si->idle[wid] < spurs_idle_max()) si->idle[wid]++;
+-        slot->busy = 0;
+-        WakeAllConditionVariable(&si->wake);
++        if (polls) si->idle[finished_wid] = 0;
++        else if (si->idle[finished_wid] < spurs_idle_max()) si->idle[finished_wid]++;
++
++        int repicked = 0;
++        if (spurs_self_pick_is_enabled() && !si->stopping) {
++            u32 ea = si->ea;
++            u32 enabled = vm_read32(ea + SPURS_WKL_ENABLED);
++            const u32 nwid = si->is2 ? SPURS_MAX_WID : 16u;
++            WklPm* pick_pm = NULL;
++            u32 pick_wid = 0;
++            int pick_kicked = 0;
++
++            AcquireSRWLockExclusive(&s_workload_registry_lock);
++
++            if ((enabled & (0x80000000u >> finished_wid)) &&
++                vm_read8(ea + wkl_state_off(finished_wid)) == 2 &&
++                s_workloads[finished_wid].in_use &&
++                s_workloads[finished_wid].spurs_ea == ea &&
++                vm_read8(ea + wkl_info_off(finished_wid) + 0x18 +
++                         slot->spu_num)) {
++                u32 maxcont = wkl_count_get(ea, SPURS_WKL_MAXCONT,
++                                             finished_wid, si->is2);
++                if (maxcont && si->active[finished_wid] < maxcont) {
++                    WklPm* pm = spurs_resolve_pm(finished_wid);
++                    if (pm) {
++                        u32 signal = vm_read16(ea + wkl_signal_off(finished_wid));
++                        u32 ready = vm_read8(ea + wkl_ready_off(finished_wid));
++                        int flagged =
++                            vm_read8(ea + SPURS_WKL_FLAG_RECV) == finished_wid &&
++                            vm_read32(ea + SPURS_WKL_FLAG_WORD) == 0;
++                        int kicked = ready ||
++                            (signal & wkl_signal_bit(finished_wid)) || flagged;
++
++                        if (kicked) si->idle[finished_wid] = 0;
++                        /* 124b: kicked only. A WWS list blocked on a dependency
++                         * polls too (it spins), so polls>0 re-ran spinning EDGE
++                         * workers forever and starved RsxSync: run 124 froze with
++                         * the RSX parked on a hole. */
++                        if (kicked) {
++                            pick_pm = pm;
++                            pick_wid = finished_wid;
++                            pick_kicked = kicked;
++                        }
++                    }
++                }
++            }
++
++            /* 124b: a kicked workload with no SPU at all goes first (it may be
++             * the one that releases the others); it overrides the own pick. */
++            {
++                for (u32 checked = 0; checked < nwid; checked++) {
++                    u32 wid = si->cursor % nwid;
++                    si->cursor = (wid + 1) % nwid;
++                    if (wid == finished_wid ||
++                        !(enabled & (0x80000000u >> wid)) ||
++                        vm_read8(ea + wkl_state_off(wid)) != 2 ||
++                        !s_workloads[wid].in_use ||
++                        s_workloads[wid].spurs_ea != ea)
++                        continue;
++                    if (!vm_read8(ea + wkl_info_off(wid) + 0x18 +
++                                  slot->spu_num))
++                        continue;
++                    u32 maxcont = wkl_count_get(ea, SPURS_WKL_MAXCONT,
++                                                 wid, si->is2);
++                    if (!maxcont || si->active[wid] >= maxcont) continue;
++                    WklPm* pm = spurs_resolve_pm(wid);
++                    if (!pm) continue;
++
++                    u32 signal = vm_read16(ea + wkl_signal_off(wid));
++                    u32 ready = vm_read8(ea + wkl_ready_off(wid));
++                    int flagged =
++                        vm_read8(ea + SPURS_WKL_FLAG_RECV) == wid &&
++                        vm_read32(ea + SPURS_WKL_FLAG_WORD) == 0;
++                    int kicked = ready || (signal & wkl_signal_bit(wid)) ||
++                                 flagged;
++                    if (!kicked || si->active[wid]) continue;   /* 124b: only starving ones */
++
++                    si->idle[wid] = 0;
++                    pick_pm = pm;
++                    pick_wid = wid;
++                    pick_kicked = 1;
++                    break;
++                }
++            }
++
++            if (pick_pm) {
++                spurs_dispatch_slot(si, slot, pick_pm, pick_wid, ea,
++                                    pick_kicked, pick_kicked);
++                repicked = 1;
++            }
++            ReleaseSRWLockExclusive(&s_workload_registry_lock);
++        }
++
++        if (!repicked) {
++            slot->busy = 0;
++            WakeAllConditionVariable(&si->wake);
++        }
      }
      ReleaseSRWLockExclusive(&si->lock);
 +    sprof_thread_exit();
      ps3_tprof_thread_exit();
      return 0;
  }
-@@ -2024,6 +2053,7 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+@@ -2022,8 +2386,20 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+ {
+     struct SpursInst* si = (struct SpursInst*)p;
      ps3_thread_name("spurs kernel");
++    spurs_prio_cfg();
++    if (s_kern_boost) {
++        int b = spurs_prio_base();
++        if (b >= 0) {
++            spurs_prio_set(b - s_kern_boost);
++#ifdef __SWITCH__
++            if (__sync_lock_test_and_set(&s_kernel_prio_logged, 1) == 0)
++                fprintf(stderr, "[spurs-prio] kernel base=%d -> %d\n", b, b - s_kern_boost);
++#endif
++        }
++    }
      int disabled = getenv("PS3_NO_SPURS_PM") != NULL;
      unsigned kick_run = 0;
 +    sprof_thread('K', 0);
      AcquireSRWLockExclusive(&si->lock);
      while (!si->stopping) {
          /* A request line committed during the last pass: look again now. Such a
-@@ -2036,13 +2066,18 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+@@ -2036,13 +2412,18 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
          if (__atomic_exchange_n(&si->kick, 0, __ATOMIC_ACQ_REL)) {
              kick_pass = ++kick_run < 16;
          } else {
@@ -501,14 +972,31 @@ index b09220e2..8a477b83 100644
          u32 ea = si->ea;
          AcquireSRWLockExclusive(&s_workload_registry_lock);
          if (!kick_pass) si->pass_no++;
-@@ -2092,14 +2127,17 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
-                 spu_lockline_lock();
-                 wkl_count_set(ea, SPURS_WKL_CURCONT, wid, si->is2, si->active[wid]);
-                 ef_line_end(ea);
-+                slot->t_busy_us = sprof_now_us();
-+                sprof_kernel_dispatch(kicked);
-                 slot->busy = 1;
+@@ -2074,32 +2455,15 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+                 if (kicked) si->idle[wid] = 0;
+                 if (!kicked && (kick_pass || (si->pass_no & ((1u << si->idle[wid]) - 1))))
+                     continue;
+-                spu_lockline_lock();
+-                ready = vm_read8(ea + wkl_ready_off(wid));
+-                signal = vm_read16(ea + wkl_signal_off(wid));
+-                if (ready) vm_base[ea + wkl_ready_off(wid)] = (u8)(ready - 1);
+-                if (signal & wkl_signal_bit(wid))
+-                    ef_w16(ea + wkl_signal_off(wid), (u16)(signal & ~wkl_signal_bit(wid)));
+-                if (vm_read8(ea + SPURS_WKL_FLAG_RECV) == wid)
+-                    ef_w32(ea + SPURS_WKL_FLAG_WORD, 0xFFFFFFFFu);
+-                ef_line_end(ea);
+-                slot->fn = pm->fn; slot->image_id = pm->image_id;
+-                slot->pm = vm_base + (u32)(uintptr_t)s_workloads[wid].pm;
+-                slot->pm_size = s_workloads[wid].sizePm;
+-                slot->data = vm_read64(ea + wkl_info_off(wid) + 8);
+-                slot->wid = wid; slot->ea = ea;
+-                si->active[wid]++;
+-                spu_lockline_lock();
+-                wkl_count_set(ea, SPURS_WKL_CURCONT, wid, si->is2, si->active[wid]);
+-                ef_line_end(ea);
+-                slot->busy = 1;
 -                WakeAllConditionVariable(&si->wake);
++                spurs_dispatch_slot(si, slot, pm, wid, ea, kicked, 1);
 +                WakeConditionVariable(&slot->go);
                  break;
              }
@@ -520,7 +1008,7 @@ index b09220e2..8a477b83 100644
      return 0;
  }
  
-@@ -2124,6 +2162,7 @@ static s32 spurs_scheduler_start(struct SpursInst* si)
+@@ -2124,6 +2488,7 @@ static s32 spurs_scheduler_start(struct SpursInst* si)
  failed:
      AcquireSRWLockExclusive(&si->lock);
      si->stopping = 1; WakeAllConditionVariable(&si->wake);
@@ -528,7 +1016,7 @@ index b09220e2..8a477b83 100644
      ReleaseSRWLockExclusive(&si->lock);
      for (u32 sn = 0; sn < si->nspus; sn++) {
          HANDLE h = si->slots[sn].thread;
-@@ -2143,6 +2182,7 @@ static s32 spurs_scheduler_stop(struct SpursInst* si, u32 ea)
+@@ -2143,6 +2508,7 @@ static s32 spurs_scheduler_stop(struct SpursInst* si, u32 ea)
      for (u32 wid = 0; wid < SPURS_MAX_WID; wid++)
          if (si->active[wid]) { ReleaseSRWLockExclusive(&si->lock); return CELL_SPURS_CORE_ERROR_BUSY; }
      si->stopping = 1; WakeAllConditionVariable(&si->wake);
@@ -537,7 +1025,7 @@ index b09220e2..8a477b83 100644
      if (si->coordinator) { WaitForSingleObject(si->coordinator, INFINITE); CloseHandle(si->coordinator); si->coordinator = NULL; }
      for (u32 sn = 0; sn < si->nspus; sn++) {
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index f073f327..b91f3c05 100644
+index f073f327..c9445909 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -1,3 +1,4 @@
@@ -545,7 +1033,7 @@ index f073f327..b91f3c05 100644
  /*
   * ps3recomp - cellGcmSys HLE module implementation
   *
-@@ -2166,8 +2167,164 @@ static void wprof_note_walker(void)
+@@ -2166,8 +2167,194 @@ static void wprof_note_walker(void)
      }
      pthread_detach(t);
  }
@@ -612,17 +1100,27 @@ index f073f327..b91f3c05 100644
 +        fprintf(stderr, "[wprof] %s %llx %u\n", tag, (unsigned long long)key[best], cnt[best]);
 +    }
 +}
++extern volatile unsigned long long g_at_menu_ns;   /* cellPad.c */
++static int s_wprof_rel_menu;
++typedef struct { uint64_t addr, size; uint32_t type, attr, perm, ipc_ref, dev_ref, pad; } wprof_meminfo; /* libnx MemoryInfo */
++extern uint32_t svcQueryMemory(wprof_meminfo* info, uint32_t* pageinfo, uint64_t addr);
 +static void* wprof_thread(void* arg)
 +{
 +    (void)arg;
 +    const struct timespec poll = {0, 100000000}, tick = {0, 1000000};
-+    const u64 start_ns = s_wprof_armed_ns + (u64)s_wprof_start_s * 1000000000ULL;
++    u64 start_ns = s_wprof_armed_ns + (u64)s_wprof_start_s * 1000000000ULL;
++    if (s_wprof_rel_menu) {   /* AT_CROSS_VDEC: "m<start_s>:<secs>" counts from the menu */
++        u64 menu_ns;
++        while (!(menu_ns = g_at_menu_ns)) nanosleep(&poll, NULL);
++        start_ns = menu_ns + (u64)s_wprof_start_s * 1000000000ULL;
++    }
 +    while (get_timestamp_ns() < start_ns) nanosleep(&poll, NULL);
 +    const uintptr_t base = (uintptr_t)__start__;
 +    const uint32_t h = s_wprof_handle;
 +    const u64 deadline = get_timestamp_ns() + (u64)s_wprof_secs * 1000000000ULL;
 +    unsigned long long samples = 0, fails = 0;
 +    static wprof_nx_ctx ctx;
++    uintptr_t stk_lo = 0, stk_hi = 0;
 +    do {
 +        uintptr_t addr[2 + WPROF_CHAIN];
 +        unsigned na = 0;
@@ -633,8 +1131,15 @@ index f073f327..b91f3c05 100644
 +            uintptr_t fp = (uintptr_t)ctx.fp;
 +            addr[na++] = (uintptr_t)ctx.pc;
 +            addr[na++] = (uintptr_t)ctx.lr;
++            /* 115: bound the fp chain by the mapped region holding sp (the old
++             * sp+16 MB bound let a garbage fp past the stack top fault the app). */
++            if (sp < stk_lo || sp >= stk_hi) {
++                wprof_meminfo mi; uint32_t pi;
++                if (svcQueryMemory(&mi, &pi, sp) == 0) { stk_lo = mi.addr; stk_hi = mi.addr + mi.size; }
++                else stk_lo = stk_hi = 0;
++            }
 +            for (unsigned d = 0; d < WPROF_CHAIN; d++) {
-+                if ((fp & 15u) || fp < sp || fp >= sp + 0x1000000u) break;
++                if ((fp & 15u) || fp < sp || fp + 16u > stk_hi) break;
 +                const uintptr_t next = ((const uintptr_t*)fp)[0];
 +                const uintptr_t ret  = ((const uintptr_t*)fp)[1];
 +                if (!ret) break;
@@ -673,6 +1178,7 @@ index f073f327..b91f3c05 100644
 +    if (!atomic_compare_exchange_strong(&s_wprof_state, &unset, 1)) return;
 +    const char* e = getenv(env_name);
 +    if (!e || !*e) { atomic_store(&s_wprof_state, 2); return; }
++    if (*e == 'm') { s_wprof_rel_menu = 1; e++; }
 +    int start_s = 0, secs = 0;
 +    if (sscanf(e, "%d:%d", &start_s, &secs) < 1) { atomic_store(&s_wprof_state, 2); return; }
 +    if (start_s < 0) start_s = 0;
@@ -694,7 +1200,18 @@ index f073f327..b91f3c05 100644
 +{
 +    const char* e = getenv("PPU_MAIN_PROF");
 +    if (e && *e) return;
++    e = getenv("SPU_WORKER_PROF");
++    if (e && *e) return;
 +    wprof_arm("RSX_WALKER_PROF");
++}
++/* 122: SPU_WORKER_PROF samples the first SPURS worker that runs an EDGE wid. */
++void ps3_wprof_note_spu(void)
++{
++    static int off = 0;
++    if (off || atomic_load_explicit(&s_wprof_state, memory_order_relaxed) != 0) return;
++    const char* e = getenv("SPU_WORKER_PROF");
++    if (e && *e) { fprintf(stderr, "[wprof] target=SPU_WORKER_PROF %s\n", e); wprof_arm("SPU_WORKER_PROF"); return; }
++    off = 1;
 +}
 +void ps3_wprof_note_main(void)
 +{
@@ -707,10 +1224,11 @@ index f073f327..b91f3c05 100644
  #else
  static void wprof_note_walker(void) {}
 +void ps3_wprof_note_main(void) {}
++void ps3_wprof_note_spu(void) {}
  #endif
  
  /* Host thread that last walked the FIFO, for PS3_SAMPLE_DRAIN. */
-@@ -2180,6 +2337,15 @@ void cellGcm_rsx_process_fifo(void)
+@@ -2180,6 +2367,15 @@ void cellGcm_rsx_process_fifo(void)
      const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
      AcquireSRWLockExclusive(&s_gcm_fifo_lock);
      gcm_rsx_process_fifo_unlocked();
@@ -726,7 +1244,7 @@ index f073f327..b91f3c05 100644
      ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
      if (ft_t0) {
          const uint64_t t1 = ps3_ft_now();
-@@ -2717,6 +2883,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2717,6 +2913,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
              }
              if (subch == 0 && (method == 0x64u || method == 0x68u || method == 0x6Cu)) {
                  int sem_blocked = 0;
@@ -738,7 +1256,7 @@ index f073f327..b91f3c05 100644
                  for (u32 i = 0; i < count; i++) {
                      u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
                      if (!dea) break;
-@@ -2726,7 +2897,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2726,7 +2927,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
                      { static int sn = 0, recdbg = -1; if (recdbg < 0) recdbg = getenv("GCM_RECDBG") ? 1 : 0;
                        if (recdbg && PS3_LOG_FIRST(sn, 12))
                          fprintf(stderr, "[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
@@ -748,7 +1266,7 @@ index f073f327..b91f3c05 100644
                      if (m == 0x68u && s_ft_sema_t0 && vm_read32(la) == v) {
                          ps3_ft_span(PS3_FT_SEMA, 0, s_sema_offset, v, s_ft_sema_t0, ps3_ft_now());
                          s_ft_sema_t0 = 0;
-@@ -2742,6 +2915,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2742,6 +2945,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                           * its own `put` equals it, which a snapshot from
                           * before the RELEASE never does. GCM_GET_EQ_PUT keeps
                           * publishing put at the end of the pass instead. */
@@ -756,7 +1274,7 @@ index f073f327..b91f3c05 100644
                          if (!gcm_get_eq_put())
                              vm_write32(GCM_CONTROL_GUEST_ADDR + 4, s_fifo_getoff + 4 + count * 4);
                          atomic_thread_fence(memory_order_release);
-@@ -2764,10 +2938,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2764,10 +2968,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   * <ms> on the same acquire it is consumed and said so. inFAMOUS 2
                   * acquires a label its SPU lighting writes each frame: waiting
                   * here is what orders the RSX's sampling after that write. */
@@ -770,7 +1288,7 @@ index f073f327..b91f3c05 100644
                  if (!blk_ms || now - b_t0 < blk_ms) {
                      if (PS3_FT_ON() && !s_ft_sema_t0) s_ft_sema_t0 = ps3_ft_now();
                      sem_blocked = 1; break;
-@@ -2776,6 +2951,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2776,6 +2981,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                      fprintf(stderr, "[SEMA] acquire off=0x%X == 0x%08X gave up after %u ms (label 0x%08X)\n",
                              s_sema_offset, v, blk_ms, vm_read32(la)); }
                  b_t0 = 0;
@@ -778,7 +1296,7 @@ index f073f327..b91f3c05 100644
              }
          }
                  }
-@@ -3387,8 +3563,25 @@ u32 cellGcm_display_buffer_count(void)
+@@ -3387,8 +3593,25 @@ u32 cellGcm_display_buffer_count(void)
      return n;
  }
  
@@ -805,7 +1323,7 @@ index f073f327..b91f3c05 100644
       * which answers "did it ever flip?" and not "is it still flipping, and how
       * fast?" -- the question that matters when a title stops appearing on
 diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
-index a39639f1..cbb17f3b 100644
+index a39639f1..23cc7252 100644
 --- a/libs/video/rsx_commands.c
 +++ b/libs/video/rsx_commands.c
 @@ -1,3 +1,4 @@
@@ -813,31 +1331,45 @@ index a39639f1..cbb17f3b 100644
  /*
   * ps3recomp - RSX Command Buffer Processor
   *
-@@ -529,6 +530,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+@@ -21,6 +22,7 @@
+ #include <string.h>
+ #include "../../runtime/memory/vm.h"    /* VM_HLE_INJECT_BASE */
+ #include "ps3emu/log_first.h"
++#include "../../runtime/spu/spu_memwait.h"   /* 128: ps3_mem_written */
+ 
+ /* ---------------------------------------------------------------------------
+  * Global backend
+@@ -529,7 +531,8 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
          u32 ea = gcm_io_offset_to_ea(s_sem_off);
          u32 val = method == 0x1D74 ? data
                  : (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
+-        if (ea) vm_write32(ea, val);
 +        if ((s_sem_off & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) ps3_l4f_trace(method == 0x1D74 ? RSX_REL_1D74 : RSX_REL_1D70, val, g_rsx_last_reference, 0); /* l4f */
-         if (ea) vm_write32(ea, val);
++        if (ea) { vm_write32(ea, val); ps3_mem_written(ea, 4); }   /* 128: wake EDGE ring pollers */
          return 0;
        }
-@@ -542,6 +544,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+       if (method == 0x1D70) {
+@@ -542,7 +545,9 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
           * 0x00010000 != 1 and spun forever (gcm/cube sample hang after init).
           * Apply the same swap the hardware does so the pre-swap cancels out. */
          u32 val = (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
 +        if ((s_sem_off & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) ps3_l4f_trace(RSX_REL_1D70, val, g_rsx_last_reference, 0); /* l4f */
          vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), val);
++        ps3_mem_written(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), 4);   /* 128 */
          { static u32 seen[64]; static int ns = 0; int k = 0;   /* TEMP: distinct release offsets */
            for (; k < ns; k++) if (seen[k] == s_sem_off) break;
-@@ -552,6 +555,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+           if (k == ns && ns < 64) { seen[ns++] = s_sem_off;
+@@ -552,7 +557,9 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
        }
        if (method == 0x1D74) {
          extern void vm_write32(uint32_t a, uint32_t v);
 +        if ((s_sem_off & 0xFFFFu) == 0x4F0u && ps3_l4f_on()) ps3_l4f_trace(RSX_REL_1D74, data, g_rsx_last_reference, 0); /* l4f */
          vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), data);
++        ps3_mem_written(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), 4);   /* 128 */
          return 0;
        } }
-@@ -963,6 +967,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     if ((method >= 0x200 && method <= 0x23C) ||
+@@ -963,6 +970,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
       * the spin. Class 0 (software) method, no subchannel state needed here. */
      if (method == 0x0050) {
          g_rsx_last_reference = data;
@@ -846,10 +1378,34 @@ index a39639f1..cbb17f3b 100644
      }
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 19548e0a..4fc812e1 100644
+index 19548e0a..80032e18 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
-@@ -1218,7 +1218,7 @@ static u32 eng_zdepth_as_color(u32 slot, const rsx_dsp_texture* t)
+@@ -108,7 +108,9 @@ typedef struct {
+     rsx_be_format fmt;
+     u32 handle;
+     u32 feedback;          /* last immutable own-target copy, engine-owned */
+-    u64 color_serial;       /* g.write_serial of the last colour write, or 0 */
++    u32 conv;              /* 120: color_as_texture of the target at conv_serial, or 0 */
++    u64 conv_serial; u32 conv_fmt, conv_w, conv_h;
++    u64 color_serial;      /* g.write_serial of the last colour write, or 0 */
+     int guest_dirty;        /* rendered since guest memory last got a copy   */
+     u32 last_use;           /* g.frames when last bound, sampled or presented */
+ } eng_surface;
+@@ -818,10 +820,12 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+ 
+     eng_surface* s = &g.surfaces[slot];
+     if (s->feedback) { g.be->texture_release(g.be->user, s->feedback); s->feedback = 0; }
++    if (s->conv) { g.be->texture_release(g.be->user, s->conv); s->conv = 0; }
+     if (s->handle) g.be->color_target_release(g.be->user, s->handle);
+     s->location = location; s->offset = offset;
+     s->w = want_w; s->h = want_h; s->fmt = want_fmt; s->aa_grid = aa_grid;
+     s->handle = handle;
++    s->conv_serial = 0; s->conv_fmt = s->conv_w = s->conv_h = 0;
+     s->color_serial = 0;
+     s->guest_dirty = 0;
+     s->last_use = g.frames;
+@@ -1218,7 +1222,7 @@ static u32 eng_zdepth_as_color(u32 slot, const rsx_dsp_texture* t)
          const u32 tex = g.be->depth_as_color(g.be->user, z->handle, t->width, t->height,
                                               base_fmt);
          if (!tex) return 0;
@@ -858,7 +1414,48 @@ index 19548e0a..4fc812e1 100644
          z->conv = tex;
          z->conv_w = t->width; z->conv_h = t->height; z->conv_fmt = base_fmt;
          z->conv_serial = z->depth_serial;
-@@ -2780,6 +2780,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+@@ -1739,6 +1743,40 @@ static void eng_zdepth_wrote(u32 slot, const rsx_dsp_surface* sf)
+     z->used_h = sf->clip_h ? sf->clip_h : g.height;
+ }
+ 
++/* 120: a colour target sampled as Y16_X16(_FLOAT) (GoW3's luminance chain):
++ * the backend converts it in command order, so no drain, readback or
++ * re-upload. RSX_SURF_ON_GPU=0 keeps the store through guest memory.
++ * Returns the view, or 0 for the old path. */
++static u32 eng_surface_as_texture(u32 slot, const rsx_dsp_texture* t)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char* e = getenv("RSX_SURF_ON_GPU");
++        enabled = !(e && e[0] == '0' && e[1] == '\0');
++    }
++    eng_surface* s = &g.surfaces[slot];
++    const u32 base_fmt = t->format & RSX_TEX_FMT_BASE_MASK & ~(u32)RSX_TEX_FMT_UNNORM;
++    if (!enabled || !g.be->color_as_texture || !g.be->surface_view ||
++        rsx_texture_argb_is_rgba() || (base_fmt != 0x9Fu && base_fmt != 0x95u) ||
++        !(t->format & RSX_TEX_FMT_LINEAR) || t->cubemap || t->dimension == 3 ||
++        t->mipmaps > 1 || !t->width || !t->height || t->width > s->w ||
++        t->height > s->h || t->pitch != s->pitch ||
++        (s->aa_grid & 0xFFu) > 1u || (s->aa_grid >> 8) > 1u ||
++        s->fmt != RSX_BE_FMT_R8G8B8A8 || !s->handle)
++        return 0;
++    if (!s->conv || s->conv_serial != s->color_serial || s->conv_fmt != base_fmt ||
++        s->conv_w != t->width || s->conv_h != t->height) {
++        const u32 tex = g.be->color_as_texture(g.be->user, s->handle, t->width, t->height,
++                                                base_fmt);
++        if (!tex) return 0;
++        if (s->conv && s->conv != tex) g.be->texture_release(g.be->user, s->conv);
++        s->conv = tex;
++        s->conv_w = t->width; s->conv_h = t->height; s->conv_fmt = base_fmt;
++        s->conv_serial = s->color_serial;
++    }
++    return g.be->surface_view(g.be->user, s->conv, t->remap & 0xFFFFu, t->format);
++}
++
+ static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
+ {
+     const u64 serial = ++g.write_serial;
+@@ -2780,6 +2818,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
              }
              const u32 conv = eng_zdepth_as_color((u32)zsrc, &t);
              if (conv) { textures[u] = conv; continue; }
@@ -866,7 +1463,7 @@ index 19548e0a..4fc812e1 100644
              if (eng_zdepth_to_guest((u32)zsrc)) {
                  textures[u] = eng_texture_slot(t.location, t.offset, t.format,
                                                 t.width, t.height, t.mipmaps, t.pitch,
-@@ -2798,6 +2799,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+@@ -2798,6 +2837,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
              while (k < n_targets && target_slots[k] != (u32)surface_at) k++;
              if (k == n_targets) return eng_color_feedback_failure(u, s, &t);
              if (!feedback[k]) {
@@ -874,7 +1471,19 @@ index 19548e0a..4fc812e1 100644
                  const u32 copy = g.be->color_snapshot(g.be->user, s->handle);
                  if (!copy) return eng_color_feedback_failure(u, s, &t);
                  if (s->feedback) g.be->texture_release(g.be->user, s->feedback);
-@@ -2818,6 +2820,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+@@ -2814,10 +2854,19 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+             }
+             continue;
+         }
++        if (sampled >= 0 && zsrc < 0) {
++            const u32 v = eng_surface_as_texture((u32)sampled, &t);
++            if (v) {
++                { static u32 logs = 0; if (PS3_LOG_FIRST(logs, 8)) fprintf(stderr, "[rbk] surface->gpu surf %d tfmt 0x%X tex %ux%u pitch %u\n", sampled, t.format, t.width, t.height, t.pitch); }
++                textures[u] = v;
++                continue;
++            }
++        }
+         if (sampled >= 0 && zsrc < 0 &&
              g.surfaces[sampled].fmt == RSX_BE_FMT_R8G8B8A8 &&
              eng_format_reinterprets_rgba8(base_fmt) &&
              eng_surface_to_guest((u32)sampled)) {
@@ -882,6 +1491,34 @@ index 19548e0a..4fc812e1 100644
              textures[u] = eng_texture_slot(t.location, t.offset, t.format,
                                             t.width, t.height, t.mipmaps, t.pitch,
                                             (int)t.cubemap, t.remap & 0xFFFFu,
+@@ -3728,6 +3777,7 @@ void rsx_draw_engine_shutdown(void)
+         if (g.pipelines[i].handle) g.be->pipeline_release(g.be->user, g.pipelines[i].handle);
+     for (u32 i = 0; i < g.n_surfaces; i++) {
+         if (g.surfaces[i].feedback) g.be->texture_release(g.be->user, g.surfaces[i].feedback);
++        if (g.surfaces[i].conv) g.be->texture_release(g.be->user, g.surfaces[i].conv);
+         if (g.surfaces[i].handle) g.be->color_target_release(g.be->user, g.surfaces[i].handle);
+     }
+     for (u32 i = 0; i < g.n_zdepths; i++) {
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index 097692ce..a5abc210 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -286,6 +286,15 @@ typedef struct rsx_draw_backend {
+      * through guest memory. */
+     u32  (*depth_as_color)(void* user, u32 depth, u32 w, u32 h, u32 rsx_fmt);
+ 
++    /* Optional (120). A colour target's top-left w x h read as a texture of
++     * base format `rsx_fmt` gives the bytes the guest would hold for it. Only
++     * R8G8B8A8 targets, ARGB guest order:
++     *  - Y16_X16_FLOAT (0x9F): R16G16 float, X = (A<<8)|R, Y = (G<<8)|B;
++     *  - Y16_X16 (0x95): the same bits as R16G16 unorm.
++     * Any other format: 0. Made in command order (no wait); the engine owns
++     * the handle. NULL/0 keeps the store through guest memory. */
++    u32  (*color_as_texture)(void* user, u32 surface, u32 w, u32 h, u32 rsx_fmt);
++
+     /* Optional, both or neither: clear_color and clear_depth_stencil limited
+      * to the rectangle (x, y, w, h) of the target, in the engine's pixels
+      * (the sample grid of an antialiased surface), w and h never 0. RSX
 diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
 index 4aa4a176..f8315ec7 100644
 --- a/libs/video/rsx_shader_spirv.cpp
@@ -930,7 +1567,7 @@ index b9f67f57..e78babd7 100644
   *   out_words : receives the word count.
   *   log       : receives a diagnostic on failure (may be NULL).
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78c66f2..9b96a760 100644
+index f78c66f2..b46e6495 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -58,10 +58,26 @@
@@ -1097,7 +1734,7 @@ index f78c66f2..9b96a760 100644
 +}
 +
 +static void vk_pcache_save(int force)
-+{
+ {
 +    if (!s_pcache || !s_pcache_dirty) return;
 +    uint64_t now = vk_saw_ns();
 +    if (!force && now - s_pcache_saved_ns < 10000000000ull) return;
@@ -1198,7 +1835,7 @@ index f78c66f2..9b96a760 100644
 +
 +
 +static int vk_submit_and_wait_at(int line)
- {
++{
 +    const uint64_t tr0 = vk_saw_ns();
      VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
      VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -1290,27 +1927,30 @@ index f78c66f2..9b96a760 100644
      s_g.last_draws = s_g.draws;
      s_g.draws = 0;
  }
-@@ -2146,6 +2360,8 @@ typedef struct vk_eng_obj {
+@@ -2146,6 +2360,9 @@ typedef struct vk_eng_obj {
      u8       cube;                   /* TEXTURE: six layers, a CUBE view    */
      u8       snapshot;               /* COLOR: a feedback copy, never a target */
      u32      mips;                   /* TEXTURE: levels the image was created with */
 +    u32      conv;                   /* DEPTH: its depth_as_color copy (a COLOR snapshot), or 0 */
-+    u32      owner;                  /* COLOR snapshot made by depth_as_color: the depth it converts */
++    u32      cat;                    /* COLOR: its color_as_texture copy, or 0 (120) */
++    u32      owner;                  /* COLOR snapshot made by a conversion: its source */
  } vk_eng_obj;
  
  static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
-@@ -2360,6 +2576,10 @@ static void vk_eng_release(void* user, u32 handle)
+@@ -2360,6 +2577,12 @@ static void vk_eng_release(void* user, u32 handle)
      if (s_eobj[handle].kind == VK_ENG_COLOR && s_eobj[handle].snapshot) {
          /* Never an attachment, so no framebuffer names it; the image goes
           * back to the pool for the next feedback draw. */
 +        if (s_eobj[handle].owner) {
 +            vk_eng_obj* d = vk_eng_get(s_eobj[handle].owner, VK_ENG_DEPTH);
 +            if (d && d->conv == handle) d->conv = 0;
++            vk_eng_obj* c = vk_eng_get(s_eobj[handle].owner, VK_ENG_COLOR);
++            if (c && c->cat == handle) c->cat = 0;
 +        }
          vk_eng_snapshot_recycle(&s_eobj[handle]);
          memset(&s_eobj[handle], 0, sizeof s_eobj[handle]);
          return;
-@@ -2407,12 +2627,14 @@ static void vk_eng_depth_target_release(void* user, u32 handle)
+@@ -2407,12 +2630,14 @@ static void vk_eng_depth_target_release(void* user, u32 handle)
  }
  
  static void vk_eng_snapshot_pool_drain(void);
@@ -1325,7 +1965,7 @@ index f78c66f2..9b96a760 100644
      vk_eb_release();
      vk_destroy_buffer(&s_rb_stage);
      vk_destroy_buffer(&s_up_stage);
-@@ -2421,7 +2643,7 @@ static void vk_eng_shutdown(void* user)
+@@ -2421,7 +2646,7 @@ static void vk_eng_shutdown(void* user)
  static void vk_eng_submit_and_wait(void* user, u32 reason)
  {
      (void)user; (void)reason;      /* every other submission has already completed */
@@ -1334,7 +1974,7 @@ index f78c66f2..9b96a760 100644
  }
  
  static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
-@@ -2560,6 +2782,7 @@ static void vk_eng_present(void* user, u32 surface)
+@@ -2560,6 +2785,7 @@ static void vk_eng_present(void* user, u32 surface)
          vk_present_record_end(cb);
      }
      pthread_mutex_unlock(&s_vk.present_mu);
@@ -1342,7 +1982,7 @@ index f78c66f2..9b96a760 100644
      s_g.last_draws = s_g.draws;
      s_g.draws = 0;
  }
-@@ -2619,6 +2842,7 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -2619,6 +2845,7 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
                                   u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
  {
      (void)user;
@@ -1350,7 +1990,7 @@ index f78c66f2..9b96a760 100644
      u32 bpp;
      const VkFormat vf = vk_eng_format(fmt, &bpp);
      const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
-@@ -2653,9 +2877,10 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -2653,9 +2880,10 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
      o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h; o->cube = (u8)cube; o->mips = mips;
      o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0;
      /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
@@ -1363,7 +2003,7 @@ index f78c66f2..9b96a760 100644
      return hd;
  fail:
      vk_destroy_image(&o->im);
-@@ -2760,7 +2985,9 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+@@ -2760,7 +2988,9 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
      }
      o->kind = VK_ENG_COLOR; o->snapshot = 1;
      o->fmt = t->fmt; o->bpp = t->bpp; o->w = t->w; o->h = t->h;
@@ -1374,7 +2014,7 @@ index f78c66f2..9b96a760 100644
      vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT,
                       reused ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED);
      vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
-@@ -2773,7 +3000,8 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+@@ -2773,7 +3003,8 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
                      o->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
      /* The copy, made visible to whatever samples it next. */
      vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
@@ -1384,7 +2024,7 @@ index f78c66f2..9b96a760 100644
      return hd;
  }
  
-@@ -2865,6 +3093,254 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+@@ -2865,6 +3096,473 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
      }
      return rc ? 0 : snap;
  }
@@ -1399,7 +2039,7 @@ index f78c66f2..9b96a760 100644
 +    int failed;
 +    int ready;
 +    u32 n;
-+} s_dac;
++} s_dac, s_cat;   /* s_cat: color_as_texture (120) */
 +
 +static int vk_eng_dac_init(void)
 +{
@@ -1627,8 +2267,227 @@ index f78c66f2..9b96a760 100644
 +    return hd;
 +}
 +
++/* 120: color_as_texture. An R8G8B8A8 target read as Y16_X16(_FLOAT): copy
++ * out, swap the bytes into the guest's ARGB halves, copy into R16G16. */
++static int vk_eng_cat_init(void)
++{
++    static const char src[] =
++        "[[vk::binding(0, 0)]] RWStructuredBuffer<uint> buf;\n"
++        "[numthreads(64, 1, 1)]\n"
++        "void main(uint3 id : SV_DispatchThreadID) {\n"
++        "    uint w = buf[id.x];\n"
++        "    uint r = w & 0xFFu, g = (w >> 8) & 0xFFu, b = (w >> 16) & 0xFFu, a = w >> 24;\n"
++        "    buf[id.x] = (r | (a << 8)) | ((b | (g << 8)) << 16);\n"
++        "}\n";
++    static u32 words[4096];
++    char log[1024];
++    u32 n;
++    const char* what = "HLSL to SPIR-V";
++    VkShaderModule sm = VK_NULL_HANDLE;
++
++    if (s_cat.ready) return 0;
++    if (s_cat.failed) return -1;
++    if (rsx_hlsl_to_spirv(src, RSX_SHADER_STAGE_COMPUTE, words, 4096, &n,
++                          log, sizeof log))
++        goto fail;
++
++    VkDescriptorSetLayoutBinding binding = {
++        .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
++        .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
++    };
++    VkDescriptorSetLayoutCreateInfo dlci = {
++        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
++        .bindingCount = 1, .pBindings = &binding,
++    };
++    if (pvkCreateDescriptorSetLayout(s_vk.device, &dlci, NULL, &s_cat.dsl) != VK_SUCCESS) {
++        what = "vkCreateDescriptorSetLayout";
++        goto fail;
++    }
++    VkPipelineLayoutCreateInfo plci = {
++        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
++        .setLayoutCount = 1, .pSetLayouts = &s_cat.dsl,
++    };
++    if (pvkCreatePipelineLayout(s_vk.device, &plci, NULL, &s_cat.pl) != VK_SUCCESS) {
++        what = "vkCreatePipelineLayout";
++        goto fail;
++    }
++    VkShaderModuleCreateInfo smci = {
++        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
++        .codeSize = (size_t)n * sizeof words[0], .pCode = words,
++    };
++    if (pvkCreateShaderModule(s_vk.device, &smci, NULL, &sm) != VK_SUCCESS) {
++        what = "vkCreateShaderModule";
++        goto fail;
++    }
++    VkComputePipelineCreateInfo cpci = {
++        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
++        .stage = {
++            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
++            .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main",
++        },
++        .layout = s_cat.pl,
++    };
++    VkResult r = pvkCreateComputePipelines(s_vk.device, s_pcache, 1, &cpci, NULL, &s_cat.pipe);
++    pvkDestroyShaderModule(s_vk.device, sm, NULL);
++    sm = VK_NULL_HANDLE;
++    if (r != VK_SUCCESS) {
++        what = "vkCreateComputePipelines";
++        goto fail;
++    }
++    VkDescriptorPoolSize ps = {
++        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
++    };
++    VkDescriptorPoolCreateInfo dpci = {
++        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
++        .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps,
++    };
++    if (pvkCreateDescriptorPool(s_vk.device, &dpci, NULL, &s_cat.pool) != VK_SUCCESS) {
++        what = "vkCreateDescriptorPool";
++        goto fail;
++    }
++    VkDescriptorSetAllocateInfo dsai = {
++        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
++        .descriptorPool = s_cat.pool, .descriptorSetCount = 1,
++        .pSetLayouts = &s_cat.dsl,
++    };
++    if (pvkAllocateDescriptorSets(s_vk.device, &dsai, &s_cat.set) != VK_SUCCESS) {
++        what = "vkAllocateDescriptorSets";
++        goto fail;
++    }
++    s_cat.ready = 1;
++    VK_LOG("engine: color_as_texture on GPU (compute)\n");
++    return 0;
++
++fail:
++    if (sm) pvkDestroyShaderModule(s_vk.device, sm, NULL);
++    s_cat.failed = 1;
++    VK_LOG("engine: color_as_texture compute unavailable (%s)\n", what);
++    return -1;
++}
++
++static int vk_eng_cat_buffer(VkDeviceSize need)
++{
++    if (s_cat.buf.size >= need) return 0;
++    /* One size for the whole chain (720p RGBA8 and below), so the buffer and
++     * its descriptor never change under commands still in the open batch. */
++    if (need < (VkDeviceSize)(4u << 20)) need = (VkDeviceSize)(4u << 20);
++    vk_destroy_buffer(&s_cat.buf);
++    if (vk_create_device_buffer(&s_cat.buf, need,
++                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
++                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
++                                VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
++        vk_destroy_buffer(&s_cat.buf);
++        s_cat.failed = 1;
++        VK_LOG("engine: color_as_texture compute unavailable (buffer)\n");
++        return -1;
++    }
++    VkDescriptorBufferInfo bi = {
++        .buffer = s_cat.buf.buf, .offset = 0, .range = VK_WHOLE_SIZE,
++    };
++    VkWriteDescriptorSet write = {
++        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
++        .dstSet = s_cat.set, .dstBinding = 0,
++        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
++        .pBufferInfo = &bi,
++    };
++    pvkUpdateDescriptorSets(s_vk.device, 1, &write, 0, NULL);
++    return 0;
++}
++
++static u32 vk_eng_color_as_texture(void* user, u32 surface, u32 w, u32 h, u32 rsx_fmt)
++{
++    (void)user;
++    if (rsx_fmt != 0x9Fu && rsx_fmt != 0x95u) return 0;
++    const VkFormat fmt = rsx_fmt == 0x9Fu ? VK_FORMAT_R16G16_SFLOAT : VK_FORMAT_R16G16_UNORM;
++    vk_eng_obj* src = vk_eng_get(surface, VK_ENG_COLOR);
++    if (!src || src->snapshot || src->fmt != VK_FORMAT_R8G8B8A8_UNORM || !w || !h ||
++        w > src->w || h > src->h || s_cat.failed ||
++        (!s_cat.ready && vk_eng_cat_init()))
++        return 0;
++
++    const u32 texels = w * h;
++    const u32 padded = (texels + 63u) / 64u * 64u;
++    if (vk_eng_cat_buffer((VkDeviceSize)padded * 4u)) return 0;
++
++    u32 hd = src->cat;
++    vk_eng_obj* o = vk_eng_get(hd, VK_ENG_COLOR);
++    int reused = o && o->snapshot && o->owner == surface && o->w == w && o->h == h &&
++                 o->fmt == fmt;
++    int fresh = 0;
++    if (!reused) {
++        hd = vk_eng_alloc();
++        if (!hd) return 0;
++        o = &s_eobj[hd];
++        for (u32 i = 0; i < s_snap_pool_n; i++)
++            if (s_snap_pool[i].fmt == fmt && s_snap_pool[i].w == w && s_snap_pool[i].h == h) {
++                o->im = s_snap_pool[i].im;
++                s_snap_pool[i] = s_snap_pool[--s_snap_pool_n];
++                reused = 1;
++                break;
++            }
++        if (!reused && vk_create_image(&o->im, fmt, w, h,
++                                        VK_IMAGE_USAGE_SAMPLED_BIT |
++                                        VK_IMAGE_USAGE_TRANSFER_DST_BIT,
++                                        VK_IMAGE_ASPECT_COLOR_BIT)) {
++            vk_destroy_image(&o->im);
++            memset(o, 0, sizeof *o);
++            return 0;
++        }
++        o->kind = VK_ENG_COLOR; o->snapshot = 1; o->owner = surface;
++        o->fmt = fmt; o->bpp = 4; o->w = w; o->h = h;
++        src = vk_eng_get(surface, VK_ENG_COLOR);
++        src->cat = hd;
++        fresh = 1;
++    }
++
++    const int batched = vk_eb_active();
++    if (batched ? (!s_eb_pending && vk_begin()) : vk_begin()) {
++        if (fresh) vk_eng_release(user, hd);
++        return 0;
++    }
++    vk_cmd_after_everything(s_vk.cmd);
++    vk_barrier_image(src->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    VkBufferImageCopy out = {
++        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++        .imageExtent = { w, h, 1 },
++    };
++    pvkCmdCopyImageToBuffer(s_vk.cmd, src->im.img, VK_IMAGE_LAYOUT_GENERAL,
++                            s_cat.buf.buf, 1, &out);
++    vk_cmd_after_everything(s_vk.cmd);
++    pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_cat.pipe);
++    pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_cat.pl,
++                             0, 1, &s_cat.set, 0, NULL);
++    pvkCmdDispatch(s_vk.cmd, padded / 64u, 1, 1);
++    vk_cmd_after_everything(s_vk.cmd);
++    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT,
++                     reused ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED);
++    VkBufferImageCopy in = {
++        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++        .imageExtent = { w, h, 1 },
++    };
++    pvkCmdCopyBufferToImage(s_vk.cmd, s_cat.buf.buf, o->im.img,
++                            VK_IMAGE_LAYOUT_GENERAL, 1, &in);
++    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    if (batched) vk_eb_recorded();
++    else if (vk_submit_and_wait()) {
++        if (fresh) vk_eng_release(user, hd);
++        return 0;
++    }
++    s_cat.n++;
++    if (s_cat.n <= 4)
++        VK_LOG("[cat] color %u -> %u %ux%u fmt 0x%X%s\n", surface, hd, w, h,
++               rsx_fmt, reused ? " (refill)" : "");
++    return hd;
++}
++
 +static void vk_eng_dac_shutdown(void)
 +{
++    if (s_cat.buf.buf) vk_destroy_buffer(&s_cat.buf);
++    if (s_cat.pipe) pvkDestroyPipeline(s_vk.device, s_cat.pipe, NULL);
++    if (s_cat.pl) pvkDestroyPipelineLayout(s_vk.device, s_cat.pl, NULL);
++    if (s_cat.pool) pvkDestroyDescriptorPool(s_vk.device, s_cat.pool, NULL);
++    if (s_cat.dsl) pvkDestroyDescriptorSetLayout(s_vk.device, s_cat.dsl, NULL);
++    memset(&s_cat, 0, sizeof s_cat);
 +    if (s_dac.buf.buf) vk_destroy_buffer(&s_dac.buf);
 +    if (s_dac.pipe) pvkDestroyPipeline(s_vk.device, s_dac.pipe, NULL);
 +    if (s_dac.pl) pvkDestroyPipelineLayout(s_vk.device, s_dac.pl, NULL);
@@ -1639,7 +2498,7 @@ index f78c66f2..9b96a760 100644
  /* The depth aspect of a D32_SFLOAT target copies out as 32-bit floats, which
   * is what the engine asks for; other depth formats report failure. */
  static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32 h,
-@@ -2973,7 +3449,7 @@ static u32 s_esamp_count;
+@@ -2973,7 +3671,7 @@ static u32 s_esamp_count;
  
  static void vk_eng_drop_framebuffers(void)
  {
@@ -1648,7 +2507,7 @@ index f78c66f2..9b96a760 100644
      for (u32 i = 0; i < s_e2.fb_count; i++)
          if (s_e2.fb[i].fb) pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
      s_e2.fb_count = 0;
-@@ -3183,8 +3659,8 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
+@@ -3183,8 +3881,8 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
  static void vk_eng_pipeline_release(void* user, u32 pipeline)
  {
      (void)user;
@@ -1658,7 +2517,7 @@ index f78c66f2..9b96a760 100644
      vk_eng_pipe* P = &s_epipe[pipeline - 1];
      for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
          if (P->variant[t]) pvkDestroyPipeline(s_vk.device, P->variant[t], NULL);
-@@ -3331,8 +3807,11 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -3331,8 +4029,11 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
          .pViewportState = &vps, .pRasterizationState = &ras, .pMultisampleState = &ms,
          .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy,
          .layout = layout, .renderPass = rp, .subpass = 0 };
@@ -1672,7 +2531,7 @@ index f78c66f2..9b96a760 100644
          VK_LOG("engine: vkCreateGraphicsPipelines failed\n");
          P->variant[topo_idx] = VK_NULL_HANDLE;
      }
-@@ -3343,6 +3822,7 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+@@ -3343,6 +4044,7 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
  
  static void vk_eng2_shutdown(void* user)
  {
@@ -1680,7 +2539,7 @@ index f78c66f2..9b96a760 100644
      for (u32 i = 1; i <= VK_ENG_MAX_PIPE; i++) vk_eng_pipeline_release(user, i);
      vk_eng_drop_framebuffers();
      for (u32 f = 0; f < VK_ENG_RT_FORMATS; f++)
-@@ -3566,17 +4046,61 @@ static VkImageView vk_eng_dummy_cube_view(void)
+@@ -3566,17 +4268,61 @@ static VkImageView vk_eng_dummy_cube_view(void)
  #define VK_EB_UB_BYTES   (32u << 20)
  #define VK_EB_SB_BYTES   (64u << 20)   /* texture upload staging */
  #define VK_EB_MAX_SETS   1024u
@@ -1745,7 +2604,7 @@ index f78c66f2..9b96a760 100644
  static int vk_eb_on(void)
  {
      if (s_eb.on >= 0) return s_eb.on;
-@@ -3586,6 +4110,11 @@ static int vk_eb_on(void)
+@@ -3586,6 +4332,11 @@ static int vk_eb_on(void)
      const char* m = getenv("VK_DRAW_BATCH_MAX");
      s_eb.max_draws = m && atoi(m) > 0 ? (u32)atoi(m) : 512u;
      if (s_eb.max_draws > VK_EB_MAX_SETS) s_eb.max_draws = VK_EB_MAX_SETS;
@@ -1757,7 +2616,7 @@ index f78c66f2..9b96a760 100644
      VkPhysicalDeviceProperties p;
      pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
      s_eb.ub_align = p.limits.minUniformBufferOffsetAlignment ? p.limits.minUniformBufferOffsetAlignment : 256;
-@@ -3596,29 +4125,50 @@ static int vk_eb_on(void)
+@@ -3596,29 +4347,50 @@ static int vk_eb_on(void)
      };
      VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                                         .maxSets = VK_EB_MAX_SETS, .poolSizeCount = 3, .pPoolSizes = ps };
@@ -1816,7 +2675,7 @@ index f78c66f2..9b96a760 100644
      memset(&s_eb, 0, sizeof s_eb);
      s_eb.on = -1;
  }
-@@ -3639,11 +4189,11 @@ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src,
+@@ -3639,11 +4411,11 @@ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src,
  {
      if (!vk_eb_active()) return -2;
      const VkDeviceSize bytes = (VkDeviceSize)tight * rows;
@@ -1831,7 +2690,7 @@ index f78c66f2..9b96a760 100644
          if (off == (VkDeviceSize)-1) return -2;
      }
      for (u32 y = 0; y < rows; y++)
-@@ -3661,13 +4211,36 @@ static void vk_eng_flush(void)
+@@ -3661,13 +4433,36 @@ static void vk_eng_flush(void)
  {
      if (!s_eb_pending) return;
      s_eb_pending = 0;               /* first: the submit below must not re-enter */
@@ -1871,7 +2730,7 @@ index f78c66f2..9b96a760 100644
  static VkDeviceSize vk_eb_take(VkDeviceSize* head, VkDeviceSize cap, VkDeviceSize bytes, VkDeviceSize align)
  {
      const VkDeviceSize at = (*head + align - 1u) / align * align;
-@@ -3775,25 +4348,25 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -3775,25 +4570,25 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      VkDeviceSize voff = 0, ioff = 0;
      VkDescriptorSet set = VK_NULL_HANDLE;
      const u32 vsb = s_e2.vs_bytes ? s_e2.vs_bytes : 16u, psb = s_e2.ps_bytes ? s_e2.ps_bytes : 16u;
@@ -1905,15 +2764,16 @@ index f78c66f2..9b96a760 100644
                      s_eb.vb_head = vh; s_eb.ib_head = ih; s_eb.ub_head = uh;
                      memcpy((u8*)s_eb.ub.ptr + uvs, vk_eng_ucpu(), vsb);
                      memcpy((u8*)s_eb.ub.ptr + ups, vk_eng_ucpu() + s_g.ps_off, psb);
-@@ -3888,6 +4461,7 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -3888,6 +4683,8 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .depth_target_create  = vk_eng_depth_target_create,
      .depth_target_release = vk_eng_depth_target_release,
      .depth_snapshot       = vk_eng_depth_snapshot,
 +    .depth_as_color       = vk_eng_depth_as_color,
++    .color_as_texture     = vk_eng_color_as_texture,
      .color_snapshot       = vk_eng_color_snapshot,
      .pipeline_create      = vk_eng_pipeline_create,
      .pipeline_release     = vk_eng_pipeline_release,
-@@ -4014,6 +4588,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4014,6 +4811,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      if (s_vk.windowed && vk_load_wsi_device_functions())
          vk_window_drop("the driver has no swapchain functions");
      pvkGetDeviceQueue(s_vk.device, s_vk.queue_family, 0, &s_vk.queue);
@@ -1921,7 +2781,7 @@ index f78c66f2..9b96a760 100644
  
      VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                      .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-@@ -4225,4 +4800,19 @@ int rsx_vulkan_backend_depth_bounds(void)
+@@ -4225,4 +5023,19 @@ int rsx_vulkan_backend_depth_bounds(void)
      return s_vk.eng_active && s_vk.depth_bounds_ok;
  }
  
@@ -2089,35 +2949,45 @@ index 30538f14..d3c733ad 100644
  /* ---------------------------------------------------------------------------
   * Critical sections: a recursive mutex, as on Windows.
 diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
-index 37e37454..7f91211e 100644
+index 37e37454..0e729c8b 100644
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
-@@ -268,6 +268,24 @@ static DIR* fd_dir(int fd)
+@@ -268,6 +268,34 @@ static DIR* fd_dir(int fd)
      return fd >= 0 && fd < FS_MAX ? __atomic_load_n(&g_dirs[fd], __ATOMIC_ACQUIRE) : nullptr;
  }
  
 +/* FS_REDIRECT=SRC=DST: use the host path with SRC replaced by DST (open and
 + * stat). GoW3 plays OPENINGCREDITS.M2V (~7700 AUs, ~26 min at our frame rate)
-+ * before the menu; OPENINGCREDITS.M2V=SMLOGO.M2V swaps in the 330-AU logo. */
++ * before the menu; OPENINGCREDITS.M2V=SMLOGO.M2V swaps in the 330-AU logo.
++ * Several pairs separated by ',' (first match wins). */
 +static void fs_redirect(char* hpath, size_t n, const char* gpath)
 +{
-+    const char* r = getenv("FS_REDIRECT");
-+    const char* eq = r ? strchr(r, '=') : nullptr;
-+    size_t sl = eq ? (size_t)(eq - r) : 0;
-+    if (sl == 0 || sl >= 128) return;
-+    char src[128]; memcpy(src, r, sl); src[sl] = 0;
-+    char* p = strstr(hpath, src);
-+    if (!p) return;
-+    char tmp[1100];
-+    snprintf(tmp, sizeof tmp, "%.*s%s%s", (int)(p - hpath), hpath, eq + 1, p + sl);
-+    snprintf(hpath, n, "%s", tmp);
-+    fprintf(stderr, "[fs] redirect '%s' -> '%s'\n", gpath, hpath);
++    for (const char* r = getenv("FS_REDIRECT"); r && *r; ) {
++        const char* end = strchr(r, ',');
++        size_t len = end ? (size_t)(end - r) : strlen(r);
++        const char* eq = (const char*)memchr(r, '=', len);
++        size_t sl = eq ? (size_t)(eq - r) : 0;
++        char src[128];
++        if (sl > 0 && sl < 128) {
++            memcpy(src, r, sl); src[sl] = 0;
++            char* p = strstr(hpath, src);
++            if (p) {
++                char tmp[1100];
++                snprintf(tmp, sizeof tmp, "%.*s%.*s%s", (int)(p - hpath), hpath,
++                         (int)(len - sl - 1), eq + 1, p + sl);
++                snprintf(hpath, n, "%s", tmp);
++                fprintf(stderr, "[fs] redirect '%s' -> '%s'\n", gpath, hpath);
++                return;
++            }
++        }
++        r = end ? end + 1 : nullptr;
++    }
 +}
 +
  /* ---- handlers ---- */
  static void cellFsOpen(ppu_context* ctx)
  {
-@@ -276,6 +294,7 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -276,6 +304,7 @@ static void cellFsOpen(ppu_context* ctx)
      uint32_t flags  = (uint32_t)ctx->gpr[4];
      uint32_t fd_ptr = (uint32_t)ctx->gpr[5];
      host_path(hpath, sizeof hpath, gpath);
@@ -2125,7 +2995,7 @@ index 37e37454..7f91211e 100644
  
      /* NPDRM: see the note in sys_fs.c -- an EDAT is decrypted once into a cache
       * file and that is opened in its place. */
-@@ -341,7 +360,9 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -341,7 +370,9 @@ static void cellFsOpen(ppu_context* ctx)
            { const char* want = ps3_env_once("FS_STACK");
              if (want && *want && strstr(gpath, want)) ydkj_host_bt("fs-open");
            } }
@@ -2136,7 +3006,7 @@ index 37e37454..7f91211e 100644
      if (ps3_env_once("PS3_FSLOG_BT") && strstr(gpath, ".usm")) {
          /* Resolve to GUEST functions (raw host RVAs are useless here): this tells us
           * which criMv/criFs function opened the movie, so the reader-attach path
-@@ -688,6 +709,7 @@ static void cellFsStat(ppu_context* ctx)
+@@ -688,6 +719,7 @@ static void cellFsStat(ppu_context* ctx)
      guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
      uint32_t sb = (uint32_t)ctx->gpr[4];
      host_path(hpath, sizeof hpath, gpath);
@@ -2144,7 +3014,7 @@ index 37e37454..7f91211e 100644
      fs_stat64_t st;
      if (FS_STAT64(hpath, &st) != 0) {
          if (ps3_env_once("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> ENOENT\n", gpath);
-@@ -890,8 +912,28 @@ static void cellFsMkdir(ppu_context* ctx)
+@@ -890,8 +922,28 @@ static void cellFsMkdir(ppu_context* ctx)
      if (ps3_env_once("PS3_FSLOG")) fprintf(stderr, "[fs] mkdir '%s' -> '%s' (%s)\n", gpath, hpath, r == 0 ? "OK" : "FAIL");
      ctx->gpr[3] = CELL_OK;   /* existing dir is benign for boot */
  }
@@ -2198,11 +3068,39 @@ index ea7de18a..2bc02bd4 100644
  extern "C" void ppu_report_guest_lrs(void)
  {
      long n = g_resv_ctx_n; if (n > PPU_RESV_MAX) n = PPU_RESV_MAX;
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+index fd2c2078..716861d2 100644
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -601,6 +601,7 @@ static void hle_cellGcmInitBody(ppu_context* ctx)
+ extern "C" void ps3_net_host_register(unsigned int (*guest_alloc)(unsigned int, unsigned int));
+ extern "C" void np_score_register_ctx(void);   /* libs/network/sceNpScore.c */
+ extern "C" void cellSaveData_register_ctx_handlers(void); /* libs/system/cellSaveData.c */
++extern "C" void cellSpurs_register_ctx_handlers(void);    /* 124: libs/spurs/cellSpurs.c, maxContention */
+ extern "C" void avconf_register_ctx(void);     /* libs/misc/cellAvconfExt.c */
+ static uint32_t g_net_errno_ea = 0;
+ static void hle_net_errno_loc(ppu_context* ctx)
+@@ -932,6 +933,7 @@ extern "C" void ppu_sysprx_register(void)
+     /* sceNpScore ranking calls take up to 15 arguments: the ones past r10
+      * come off the stack, so they need the full context. */
+     np_score_register_ctx();
++    cellSpurs_register_ctx_handlers();   /* 124: _cellSpursWorkloadAttributeInitialize 9th arg (SP+0x70) */
+     /* cellSaveDataUserAutoLoad/UserAutoSave take nine arguments; the ninth
+      * (userdata) is on the guest stack, so they need the full context too.
+      * Registered here so no project has to remember the call. */
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 84b7ac96..9d6d5d55 100644
+index 84b7ac96..fe8e7a15 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
-@@ -40,6 +40,7 @@
+@@ -14,6 +14,7 @@
+ 
+ #include "spu_dma.h"
+ #include "spu_coherency.h" /* lock-line lock + PPU-write coherence bitmap */
++SPU_THREAD_LOCAL unsigned g_spu_dma_ops = 0;   /* 124b: plain DMA issued by this SPU thread (spu_dma.h) */
+ #include "spu_helpers.h"   /* spu_splat_u32 / spu_ls_read128 (SMC microstep) */
+ #include "spu_lockstep.h"
+ #include "spu_interp.h"    /* spu_lifted_fn / spu_lifted_lookup -- defined below */
+@@ -40,6 +41,7 @@
  #include <time.h>
  #include "../platform/win32_compat.h"
  #include "ps3emu/log_first.h"
@@ -2210,7 +3108,7 @@ index 84b7ac96..9d6d5d55 100644
  
  #ifdef __cplusplus
  extern "C" {
-@@ -962,6 +963,40 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
+@@ -962,6 +964,40 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
      }
  }
  
@@ -2251,7 +3149,7 @@ index 84b7ac96..9d6d5d55 100644
  static int channel_is_mfc(uint32_t ch)
  {
      switch (ch) {
-@@ -1012,6 +1047,7 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
+@@ -1012,6 +1048,7 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
           * not the plain GET/PUT the DMA engine would do. */
          if (channel == MFC_Cmd && spu_mfc_atomic(ctx, v))
              return;
@@ -2259,7 +3157,7 @@ index 84b7ac96..9d6d5d55 100644
          mfc_channel_write(mfc_for(ctx), ctx, channel, v);
          /* MFC tag-status-update EVENT producer (channel-stall milestone). Our
           * DMA completes synchronously, so the instant the program arms tag
-@@ -1209,6 +1245,7 @@ static void spu_ft_wait_span(spu_context* ctx, uint32_t channel, uint64_t t0)
+@@ -1209,6 +1246,7 @@ static void spu_ft_wait_span(spu_context* ctx, uint32_t channel, uint64_t t0)
  static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
  {
      if (!yz_ch_block() || spu_ch_ready(ctx, channel)) return;
@@ -2267,7 +3165,7 @@ index 84b7ac96..9d6d5d55 100644
      const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
  
      { static unsigned long bn = 0; unsigned long n = ++bn;
-@@ -1244,6 +1281,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+@@ -1244,6 +1282,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
      }
      yz_lockstep_block_end(ctx);            /* rejoin the rotation, reacquire the token */
      if (ft_t0) spu_ft_wait_span(ctx, channel, ft_t0);
@@ -2275,7 +3173,251 @@ index 84b7ac96..9d6d5d55 100644
      ctx->status = SPU_STATUS_RUNNING;
  }
  
-@@ -2692,6 +2730,16 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -2183,12 +2222,243 @@ static void spu_ovl_dump(spu_context* ctx, uint32_t ea, uint32_t lsa, const uint
+     t_next_ea = ea + size; t_next_lsa = lsa + size;
+ }
+ 
++/* PS3_WAITCNT_WATCH=<lr hex>:<reg>: a PPU thread polls a job-count halfword
++ * with usleep (EA in <reg> at a usleep whose lr matches). Learn up to 4 such
++ * EAs and report which SPU image/pc writes them to 0 and how long the PPU had
++ * been waiting. Fed by sys_timer_usleep and spu_lockguard_check. */
++extern unsigned long long ps3_qpc_us(void);
++typedef struct {
++    _Atomic uint32_t ea;
++    _Atomic uint64_t wait_start_us;
++    _Atomic uint64_t last_poll_us;
++} waitcnt_slot;
++
++typedef struct {
++    int image_id;
++    uint32_t pc;
++    const char* what;
++    uint32_t zero_cnt;
++    uint32_t zero_in_wait;
++    uint32_t zero_no_wait;
++    uint32_t chg_cnt;
++    uint64_t zero_lat_us;
++} waitcnt_key;
++
++static waitcnt_slot g_waitcnt_slots[4];
++static _Atomic int g_waitcnt_n;
++static waitcnt_key g_waitcnt_keys[32];
++static uint32_t g_waitcnt_waits;
++static uint32_t g_waitcnt_waits_unmatched;
++static uint64_t g_waitcnt_wait_total_us;
++static uint64_t g_waitcnt_report_t0_us;
++static uint32_t g_waitcnt_other;
++static uint32_t g_waitcnt_zero_logs;
++static atomic_flag g_waitcnt_lock = ATOMIC_FLAG_INIT;
++
++static void waitcnt_lock(void)
++{
++    while (atomic_flag_test_and_set_explicit(&g_waitcnt_lock, memory_order_acquire))
++        ;
++}
++
++static void waitcnt_unlock(void)
++{
++    atomic_flag_clear_explicit(&g_waitcnt_lock, memory_order_release);
++}
++
++static waitcnt_key* waitcnt_key_for(int image_id, uint32_t pc, const char* what)
++{
++    int i;
++
++    for (i = 0; i < 32; i++) {
++        waitcnt_key* key = &g_waitcnt_keys[i];
++
++        if (key->what && key->image_id == image_id && key->pc == pc && key->what == what)
++            return key;
++    }
++
++    for (i = 0; i < 32; i++) {
++        waitcnt_key* key = &g_waitcnt_keys[i];
++
++        if (!key->what) {
++            key->image_id = image_id;
++            key->pc = pc;
++            key->what = what;
++            return key;
++        }
++    }
++
++    return NULL;
++}
++
++static void waitcnt_report(uint64_t now_us, int n)
++{
++    int i;
++    int j;
++    int picked[32] = {0};
++
++    fprintf(stderr, "[waitcnt] 30s: waits=%u unmatched=%u wait_ms=%.1f slots=%d other=%u\n",
++            g_waitcnt_waits, g_waitcnt_waits_unmatched,
++            (double)g_waitcnt_wait_total_us / 1000.0, n, g_waitcnt_other);
++
++    for (i = 0; i < 8; i++) {
++        int best = -1;
++
++        for (j = 0; j < 32; j++) {
++            waitcnt_key* key = &g_waitcnt_keys[j];
++
++            if (picked[j] || (!key->zero_cnt && !key->chg_cnt))
++                continue;
++            if (best < 0 || key->zero_cnt > g_waitcnt_keys[best].zero_cnt ||
++                (key->zero_cnt == g_waitcnt_keys[best].zero_cnt &&
++                 key->chg_cnt > g_waitcnt_keys[best].chg_cnt))
++                best = j;
++        }
++
++        if (best < 0)
++            break;
++
++        {
++            waitcnt_key* key = &g_waitcnt_keys[best];
++            double avg = key->zero_in_wait ?
++                (double)key->zero_lat_us / (double)key->zero_in_wait : 0.0;
++
++            fprintf(stderr,
++                    "[waitcnt]   img=%d pc=0x%05X %s zero=%u in_wait=%u avg_wait_us=%.0f chg=%u\n",
++                    key->image_id, (unsigned)key->pc, key->what, key->zero_cnt,
++                    key->zero_in_wait, avg, key->chg_cnt);
++        }
++        picked[best] = 1;
++    }
++
++    for (i = 0; i < 32; i++) {
++        waitcnt_key* key = &g_waitcnt_keys[i];
++
++        key->zero_cnt = 0;
++        key->zero_in_wait = 0;
++        key->zero_no_wait = 0;
++        key->chg_cnt = 0;
++        key->zero_lat_us = 0;
++    }
++
++    g_waitcnt_waits = 0;
++    g_waitcnt_waits_unmatched = 0;
++    g_waitcnt_wait_total_us = 0;
++    g_waitcnt_other = 0;
++    g_waitcnt_report_t0_us = now_us;
++}
++
++void spu_waitcnt_ppu_poll(uint32_t ea, uint64_t now_us)
++{
++    int n;
++    int i;
++    waitcnt_slot* slot = NULL;
++
++    waitcnt_lock();
++    n = atomic_load_explicit(&g_waitcnt_n, memory_order_relaxed);
++    for (i = 0; i < n; i++) {
++        if (atomic_load_explicit(&g_waitcnt_slots[i].ea, memory_order_relaxed) == ea) {
++            slot = &g_waitcnt_slots[i];
++            break;
++        }
++    }
++
++    if (!slot && n < 4) {
++        slot = &g_waitcnt_slots[n];
++        atomic_store_explicit(&slot->ea, ea, memory_order_relaxed);
++        atomic_store_explicit(&g_waitcnt_n, n + 1, memory_order_release);
++        n++;
++    }
++
++    if (slot) {
++        uint64_t start = atomic_load_explicit(&slot->wait_start_us, memory_order_relaxed);
++        uint64_t last = atomic_load_explicit(&slot->last_poll_us, memory_order_relaxed);
++
++        if (!start || now_us - last > 5000) {
++            if (start) {
++                g_waitcnt_waits_unmatched++;
++                g_waitcnt_wait_total_us += now_us - start;
++            }
++            atomic_store_explicit(&slot->wait_start_us, now_us, memory_order_relaxed);
++            g_waitcnt_waits++;
++        }
++        atomic_store_explicit(&slot->last_poll_us, now_us, memory_order_relaxed);
++    }
++
++    if (!g_waitcnt_report_t0_us)
++        g_waitcnt_report_t0_us = now_us;
++    else if (now_us - g_waitcnt_report_t0_us >= 30000000)
++        waitcnt_report(now_us, n);
++    waitcnt_unlock();
++}
++
++static void waitcnt_spu_write(spu_context* ctx, uint32_t ea, const uint8_t* src,
++                               uint32_t size, const char* what, int n)
++{
++    int i, hit = 0;
++
++    for (i = 0; i < n && !hit; i++) {   /* unlocked range test: every SPU PUT gets here */
++        uint32_t w = atomic_load_explicit(&g_waitcnt_slots[i].ea, memory_order_relaxed);
++        hit = w >= ea && (uint64_t)w + 2 <= (uint64_t)ea + size;
++    }
++    if (!hit) return;
++    waitcnt_lock();
++    for (i = 0; i < n; i++) {
++        uint32_t w = atomic_load_explicit(&g_waitcnt_slots[i].ea, memory_order_relaxed);
++
++        if (w >= ea && (uint64_t)w + 2 <= (uint64_t)ea + size) {
++            uint32_t old = ((uint32_t)vm_base[w] << 8) | vm_base[w + 1];
++            uint32_t nw = ((uint32_t)src[w - ea] << 8) | src[w - ea + 1];
++
++            if (old != nw) {
++                waitcnt_key* key = waitcnt_key_for(ctx->image_id, ctx->pc & SPU_LS_MASK, what);
++
++                if (!key)
++                    g_waitcnt_other++;
++                if (!nw) {
++                    uint64_t now_us = (uint64_t)ps3_qpc_us();
++                    uint64_t start = atomic_load_explicit(&g_waitcnt_slots[i].wait_start_us,
++                                                          memory_order_relaxed);
++                    uint64_t lat = 0;
++
++                    if (start) {
++                        lat = now_us - start;
++                        if (key) {
++                            key->zero_cnt++;
++                            key->zero_in_wait++;
++                            key->zero_lat_us += lat;
++                        }
++                        g_waitcnt_wait_total_us += lat;
++                        atomic_store_explicit(&g_waitcnt_slots[i].wait_start_us, 0,
++                                              memory_order_relaxed);
++                    } else if (key) {
++                        key->zero_cnt++;
++                        key->zero_no_wait++;
++                    }
++
++                    if (PS3_LOG_FIRST(g_waitcnt_zero_logs, 40))
++                        fprintf(stderr,
++                                "[waitcnt] t=%llu ea=0x%08X %u->0 %s img=%d pc=0x%05X wait=%lluus\n",
++                                (unsigned long long)now_us, (unsigned)w, (unsigned)old, what,
++                                ctx->image_id, (unsigned)(ctx->pc & SPU_LS_MASK),
++                                (unsigned long long)lat);
++                } else if (key) {
++                    key->chg_cnt++;
++                }
++            }
++        }
++    }
++    waitcnt_unlock();
++}
++
+ /* SPU_LOCKGUARD=<hex ea>: the word at that EA is a ticket lock (serving,next
+  * halfwords). Log any SPU write that moves either halfword by anything other
+  * than 0 or +1 -- a stale whole-line store rolling the lock back. `src` is the
+  * new bytes for [ea, ea+size). */
+ void spu_lockguard_check(spu_context* ctx, uint32_t ea, const uint8_t* src, uint32_t size, const char* what)
+ {
++    { int n = atomic_load_explicit(&g_waitcnt_n, memory_order_relaxed);
++      if (n && vm_base) waitcnt_spu_write(ctx, ea, src, size, what, n); }
+     static int64_t s_g = -2;
+     if (s_g == -2) { const char* e = getenv("SPU_LOCKGUARD"); s_g = e ? (int64_t)strtoul(e, 0, 16) : -1; }
+     if (s_g < 0 || !vm_base) return;
+@@ -2692,6 +2962,16 @@ void spu_indirect_branch(spu_context* ctx)
       * and falls into branch-to-0. All lifted funcs live below SPU_LS_SIZE, so
       * masking is a no-op for already-valid targets. */
      ctx->pc &= SPU_LS_MASK;
@@ -2292,7 +3434,7 @@ index 84b7ac96..9d6d5d55 100644
      /* Interrupt-return register restore (see spu_drain.c spu_irq_regs_save):
       * the WWS handler's save/restore shim lives at unlifted top-of-LS, so we
       * enforce the preserve-all-registers hardware contract here -- the first
-@@ -2737,7 +2785,24 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -2737,7 +3017,46 @@ void spu_indirect_branch(spu_context* ctx)
                if (s_t && (n <= 4 || (n % 4096) == 0) && s_poll_logs++ < 64)
                    fprintf(stderr, "[spurs-pm] poll #%u (r3=0x%08X) -> continue\n",
                            n, ctx->gpr[3]._u32[0]); }
@@ -2314,11 +3456,33 @@ index 84b7ac96..9d6d5d55 100644
 +                  { static int _n = 0; if (PS3_LOG_FIRST(_n, 4))
 +                      fprintf(stderr, "[spurs-pm] poll answers wklCurrentId=%u (SPURS_POLL_CUR)\n", ans); }
 +              }
++              /* SPURS_POLL_CUR_WIDS=8,9,10 [+ SPURS_POLL_CUR_US=2000]: the same answer,
++               * only for those wids and only during the first <us> after the run's
++               * first poll; then 0 again, so a serial chain (EDGE) keeps its job
++               * manager without starving the other workloads. */
++              { static SPU_THREAD_LOCAL unsigned s_wm = ~0u, s_wus; static SPU_THREAD_LOCAL uint64_t s_wt0;
++                if (s_wm == ~0u) { const char* e = getenv("SPURS_POLL_CUR_WIDS"); s_wm = 0;
++                  while (e && *e) { char* q; long v = strtol(e, &q, 10); if (q == e) break;
++                    if (v >= 0 && v < 31) s_wm |= 1u << v; e = *q ? q + 1 : q; }
++                  e = getenv("SPURS_POLL_CUR_US"); s_wus = e ? (unsigned)atoi(e) : 2000u; }
++                const uint32_t wid = ((uint32_t)ctx->ls[0x1DE] << 8) | ctx->ls[0x1DF];
++                if (!ans && wid < 31 && ((s_wm >> wid) & 1u)) {
++                  const uint64_t now = spu_host_ns(); if (n == 1) s_wt0 = now;
++                  if (now - s_wt0 < (uint64_t)s_wus * 1000ull) ans = wid;
++                  /* 124b: SPURS_POLL_IDLE=<n> (def. 16, 0 off): n polls in a row with no
++                   * plain DMA between them = the module spins on a blocked list; let it
++                   * exit instead of burning a core for the rest of the window. */
++                  { static SPU_THREAD_LOCAL unsigned s_dl, s_ni; static int s_im = -1;
++                    if (s_im < 0) { const char* q = getenv("SPURS_POLL_IDLE"); s_im = q ? atoi(q) : 16; }
++                    if (n == 1 || g_spu_dma_ops != s_dl) { s_dl = g_spu_dma_ops; s_ni = 0; }
++                    else if (++s_ni >= (unsigned)s_im && s_im > 0) ans = 0; }
++                  { static int _w = 0; if (ans && PS3_LOG_FIRST(_w, 3))
++                      fprintf(stderr, "[spurs-pm] poll keeps wid=%u (SPURS_POLL_CUR_WIDS, %u us)\n", wid, s_wus); } } }
 +              ctx->gpr[3] = spu_make_preferred_u32(ans); }
              /* The kernel's selection copies the instance's first line into the
               * context's tempArea (LS 0x100) on every call, not only at module
               * entry, and jobs that ran since may have overwritten it. */
-@@ -3404,6 +3469,8 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+@@ -3404,6 +3723,8 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
              (unsigned long long)v._u64[1]);
  }
  
@@ -2329,41 +3493,96 @@ index 84b7ac96..9d6d5d55 100644
  #endif
 \ No newline at end of file
 diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
-index 400b2ba5..8766d8bc 100644
+index 8766d8bc..29c515af 100644
 --- a/runtime/spu/spu_context.h
 +++ b/runtime/spu/spu_context.h
-@@ -641,10 +641,21 @@ static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t
-     g_spu_ls_rdiag = g_spu_ls_probe || spu_ls_wws_probe_on() || g_spu_ls_watch_n != 0;
- }
- 
-+/* SPU_LS_NO_DIAG (a port's lifted SPU code, for play): no gate at all. Those
-+ * accesses are then invisible to the diagnostics above; the interpreter and
-+ * the runtime keep their gates. */
-+#if defined(SPU_LS_NO_DIAG)
-+#define SPU_LS_RDIAG() 0
-+#define SPU_LS_WDIAG() 0
-+#else
-+#define SPU_LS_RDIAG() __builtin_expect(g_spu_ls_rdiag != 0, 0)
-+#define SPU_LS_WDIAG() __builtin_expect(g_spu_ls_wdiag != 0, 0)
-+#endif
-+
- static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
- {
-     u128 v;
--    if (__builtin_expect(g_spu_ls_rdiag != 0, 0))
-+    if (SPU_LS_RDIAG())
-         spu_ls_read_diag(ctx, lsa);
-     lsa &= SPU_LS_MASK & ~0xFu;
-     const uint8_t* p = &ctx->ls[lsa];
-@@ -765,7 +776,7 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
-         p[i*4 + 3] = (uint8_t)w;
-     }
+@@ -1061,6 +1061,12 @@ void spu_direct_init(void);
+ #  if __has_attribute(musttail)
+ #    define SPU_DIRECT_TAILCALLS 1
+ #  endif
++/* 124: GCC 15+ (devkitA64 16.1) has musttail too; it was off on Switch and
++ * every lifted SPU branch went back through the drain loop. */
++#elif defined(__GNUC__) && __GNUC__ >= 15 && defined(__has_attribute)
++#  if __has_attribute(musttail)
++#    define SPU_DIRECT_TAILCALLS 1
++#  endif
  #endif
--    if (__builtin_expect(g_spu_ls_wdiag != 0, 0))
-+    if (SPU_LS_WDIAG())
-         spu_ls_write_diag(ctx, lsa, val);
- }
- 
+ #ifdef SPU_DIRECT_TAILCALLS
+ #define SPU_DIRECT(ctx, PC, FN) do {                                          \
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+index 8c4ccaa8..b9632003 100644
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -18,7 +18,18 @@
+ #include "spu_context.h"
+ #include "../../include/ps3emu/log_first.h"
+ #include "spu_coherency.h"
++#include "spu_memwait.h"
+ #include <stdint.h>
++#include <stdlib.h>
++/* 131: set by the repeat limiter: the next GET (EDGE per-draw record) lands
++ * with word 3 = 0, the path the job takes on its own 10000-poll timeout. */
++static SPU_THREAD_LOCAL int t_rec_zero;
++static inline int spu_edge_rec_skip(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("EDGE_REC_SKIP"); on = e ? atoi(e) : 1; }
++    return on;
++}
+ #include <string.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+@@ -642,6 +653,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+                   fflush(stderr);
+               }
+           } }
++        if (t_rec_zero) { t_rec_zero = 0; memset((uint8_t*)ls_ptr + 12, 0, 4); }   /* 131 */
+     } else if (mfc_is_put(cmd)) {
+         /* PUT: local store -> main memory.
+          *
+@@ -734,6 +746,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+                 }
+             }
+         }
++        ps3_mem_written((uint32_t)ea, size);   /* 128: wake GET pollers */
+         /* Tell whoever is listening where this PUT landed.
+          *
+          * A title whose SPUs build the RSX command stream never tells libgcm
+@@ -1371,6 +1384,23 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+                * poller is the frame's longest job. Yield for the first
+                * SPU_DMA_REPEAT_BACKOFF_MS (default 2) of an episode, where a
+                * healthy wait ends, and back off 1 ms per repeat after that. */
++              /* 128: a GET poll sleeps until a producer writes (RSX label
++               * release, SPU PUT) or SPU_DMA_WAIT_US (def. 200) passes,
++               * instead of up to 1 ms per poll. =0: the old path. */
++              /* 131: EDGE (img 306) polling its per-draw record (LS 0x127E0,
++               * 16 B) until word 3 = 0, capped by the job at 10000 polls (~5-10
++               * ms on hw; never reached here once polls sleep). Take the job's
++               * own timeout path now. EDGE_REC_SKIP=0 turns it off. */
++              else if (lsa == 0x127E0u && size == 16u && mfc_is_get(cmd) &&
++                       spu->image_id == 306 && spu_edge_rec_skip()) {
++                  t_rec_zero = 1; s_rep = 0; s_since = 0;
++              }
++              else if (mfc_is_get(cmd) && size <= 256u && vm_base &&
++                       ps3_memwait_timeout_us()) {
++                  static SPU_THREAD_LOCAL struct ps3_memwait_state t_mw;
++                  if (s_rep == s_limit) ps3_memwait_reset(&t_mw);
++                  ps3_memwait_unchanged(&t_mw, vm_base + (uint32_t)ea, size);
++              }
+               else if (now - s_since < s_backoff_ms) SwitchToThread();
+               else Sleep(1);
+           }
+@@ -1725,6 +1755,10 @@ static inline void mfc_channel_write(mfc_engine* mfc, spu_context* spu,
+         spu->mfc_tag = value & 0x1F;
+         break;
+     case MFC_Cmd:
++        /* 124b: plain GET/PUT this SPU thread issued (atomics are >= 0xB0); the
++         * SPURS poll (spu_channels.c) uses it to tell a working module from a
++         * spinning one. */
++        { extern SPU_THREAD_LOCAL unsigned g_spu_dma_ops; if ((value & 0xFF) < 0xB0) g_spu_dma_ops++; }
+         mfc_submit(mfc, spu, value);
+         break;
+     case MFC_WrTagMask:
 diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
 index 6d63141f..fae378dc 100644
 --- a/runtime/spu/spu_interp.c
@@ -2845,6 +4064,126 @@ index b997931b..c1f3bd71 100644
      { static int _n = 0; if (PS3_LOG_FIRST(_n, 0))
          fprintf(stderr, "[prof-stamp] ctx=%p base=%p in_range=%d lr=0x%X\n",
                  vctx, (void*)g_ppu_threads, in_range, lr); }
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+index 3a022815..35bbbc65 100644
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -14,6 +14,7 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include "ps3emu/log_first.h"
++#include <stdatomic.h>
+ #ifdef __APPLE__
+ #include <mach/mach_time.h>
+ #endif
+@@ -134,9 +135,84 @@ static void write_be64(uint32_t addr, uint64_t val)
+  *
+  * r3 = microseconds
+  * -----------------------------------------------------------------------*/
++#ifdef __SWITCH__
++extern uint32_t svcGetThreadPriority(int32_t* out, uint32_t handle);
++extern uint32_t svcSetThreadPriority(uint32_t handle, uint32_t priority);
++/* PPU_MAIN_PRIO=<boost>: raise the guest main thread (tid 1) above the SPURS
++ * workers on its first usleep. It polls job completion with usleep(30); on 3
++ * saturated cores each wake waits for a core (GoW3: 51 % of main in usleep). */
++static void ppu_main_prio_once(uint64_t tid)
++{
++    static volatile int done;
++    if (tid != 1 || done || __sync_lock_test_and_set(&done, 1)) return;
++    const char* e = getenv("PPU_MAIN_PRIO");
++    int b = e ? atoi(e) : 0, p = 0;
++    if (b <= 0 || b > 8 || svcGetThreadPriority(&p, 0xFFFF8000u) != 0) return;
++    if (p - b >= 0x18) svcSetThreadPriority(0xFFFF8000u, (uint32_t)(p - b));
++    fprintf(stderr, "[ppu-prio] main base=%d -> %d\n", p, p - b);
++}
++#else
++static void ppu_main_prio_once(uint64_t tid) { (void)tid; }
++#endif
++
++extern unsigned long long ps3_qpc_us(void);
++/* PS3_WAITCNT_WATCH: see spu_channels.c */
++extern void spu_waitcnt_ppu_poll(uint32_t ea, uint64_t now_us);
++
++static _Atomic int s_waitcnt_watch_state = -1;
++static uint32_t s_waitcnt_watch_lr;
++static unsigned int s_waitcnt_watch_reg;
++
++static void waitcnt_note_usleep(ppu_context* ctx)
++{
++    int enabled = atomic_load_explicit(&s_waitcnt_watch_state, memory_order_relaxed);
++
++    if (enabled < 0) {
++        int expected = -1;
++
++        if (atomic_compare_exchange_strong_explicit(&s_waitcnt_watch_state, &expected, -2,
++                                                    memory_order_relaxed, memory_order_relaxed)) {
++            const char* e = getenv("PS3_WAITCNT_WATCH");
++            int on = 0;
++
++            if (e) {
++                char* end;
++                unsigned long lr = strtoul(e, &end, 16);
++
++                if (end != e && *end == ':') {
++                    const char* reg_start = end + 1;
++                    unsigned long reg = strtoul(reg_start, &end, 10);
++
++                    if (end != reg_start && *end == '\0' && lr <= 0xffffffffUL && reg < 32) {
++                        s_waitcnt_watch_lr = (uint32_t)lr;
++                        s_waitcnt_watch_reg = (unsigned int)reg;
++                        on = 1;
++                    }
++                }
++            }
++
++            atomic_store_explicit(&s_waitcnt_watch_state, on, memory_order_release);
++            enabled = on;
++        } else {
++            do {
++                enabled = atomic_load_explicit(&s_waitcnt_watch_state, memory_order_acquire);
++            } while (enabled < 0);
++        }
++    }
++
++    if (!enabled)
++        return;
++    if ((uint32_t)ctx->lr != s_waitcnt_watch_lr)
++        return;
++
++    spu_waitcnt_ppu_poll((uint32_t)ctx->gpr[s_waitcnt_watch_reg], (uint64_t)ps3_qpc_us());
++}
++
+ int64_t sys_timer_usleep(ppu_context* ctx)
+ {
+     uint64_t usec = LV2_ARG_U64(ctx, 0);
++    waitcnt_note_usleep(ctx);
++    ppu_main_prio_once(ctx->thread_id);
+     ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
+     { extern unsigned long long ps3_qpc_us(void);
+       static int n=0; if (PS3_LOG_FIRST(n, 60))
+@@ -276,6 +352,22 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         } while (qpc_now.QuadPart < qpc_deadline);
+     }
+ #else
++    /* PPU_USLEEP_BACKOFF=<cap_us>: a spin of short usleeps (GoW3 waits for its
++     * SPU job chain with usleep(30), ~25k wakeups/s = ~half a core on three
++     * saturated cores) backs off: the same thread and lr again within 2 ms of
++     * the last one doubles the sleep every 8 calls, up to cap_us. 0 = off. */
++    static long s_ubo = -1;
++    static __thread uint32_t ubo_lr, ubo_n; static __thread uint64_t ubo_end;
++    if (s_ubo < 0) { const char* e = getenv("PPU_USLEEP_BACKOFF"); s_ubo = e ? strtol(e, 0, 10) : 0; }
++    if (s_ubo > 0 && usec > 0 && usec < (uint64_t)s_ubo) {
++        extern unsigned long long ps3_qpc_us(void);
++        const uint64_t now = ps3_qpc_us();
++        if ((uint32_t)ctx->lr == ubo_lr && now < ubo_end + 2000) ubo_n++;   /* < : a signal may cut the sleep short */
++        else { ubo_lr = (uint32_t)ctx->lr; ubo_n = 0; }
++        usec <<= (ubo_n / 8 > 10 ? 10 : ubo_n / 8);
++        if (usec > (uint64_t)s_ubo) usec = (uint64_t)s_ubo;
++        ubo_end = now + usec;
++    }
+     if (usec > 0) {
+         struct timespec ts;
+         ts.tv_sec  = (time_t)(usec / 1000000);
 diff --git a/include/ps3emu/spu_prof.h b/include/ps3emu/spu_prof.h
 new file mode 100644
 index 00000000..48bb9d3a
@@ -2942,269 +4281,6 @@ index 00000000..48bb9d3a
 +#endif
 +#endif /* _WIN32 */
 +#endif
-diff --git a/runtime/spu/spu_prof_impl.inc b/runtime/spu/spu_prof_impl.inc
-new file mode 100644
-index 00000000..af518299
---- /dev/null
-+++ b/runtime/spu/spu_prof_impl.inc
-@@ -0,0 +1,257 @@
-+/* SPU_PROF sampler and counters (see include/ps3emu/spu_prof.h). Included at
-+ * the end of spu_channels.c, which has spu_context. POSIX hosts only. */
-+#ifndef _WIN32
-+#include <pthread.h>
-+#include <unistd.h>
-+#include <string.h>
-+#include <time.h>
-+
-+enum { SPROF_SLOTS = 96, SPROF_KEYS = 2048, SPROF_WIDS = 32 };
-+
-+/* Switch: real CPU time per thread (svcGetInfo ThreadTickCount, subtype -1:
-+ * mesosphere returns 0 for the per-core subtypes) and busy % per core
-+ * (IdleTickCount, readable only for the caller's own core, so the sampler
-+ * visits each core). Declared here instead of including <switch.h> (its
-+ * u8..u64 clash with the runtime's). */
-+#ifdef __SWITCH__
-+extern uint32_t svcGetInfo(uint64_t* out, uint32_t id0, uint32_t handle, uint64_t id1);
-+extern uint32_t threadGetCurHandle(void);
-+extern uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t preferred_core, uint32_t affinity_mask);
-+extern uint32_t svcGetThreadCoreMask(int32_t* preferred_core, uint64_t* affinity_mask, uint32_t handle);
-+extern uint32_t svcGetCurrentProcessorNumber(void);
-+extern uint64_t svcGetSystemTick(void);
-+extern void     svcSleepThread(int64_t nano);
-+#define SPROF_TICK_HZ 19200000.0
-+#define SPROF_CUR_THREAD 0xFFFF8000u
-+static int sprof_ticks(uint32_t h, uint64_t* out)
-+{
-+    static int s_warned;
-+    const uint32_t rc = h ? svcGetInfo(out, 25u /* ThreadTickCount (13.0.0+; 0xF0000002 was removed) */, h, ~0ull) : 0xFFFFFFFFu;
-+    if (rc && !s_warned) {
-+        s_warned = 1;
-+        uint64_t self = 0;
-+        const uint32_t rc_self = svcGetInfo(&self, 25u, SPROF_CUR_THREAD, ~0ull);
-+        fprintf(stderr, "[sprof] ThreadTickCount failed: rc=0x%X h=0x%X (own pseudo-handle: rc=0x%X ticks=%llu, own handle 0x%X)\n",
-+                rc, h, rc_self, (unsigned long long)self, threadGetCurHandle());
-+    }
-+    return rc == 0;
-+}
-+static uint64_t s_idle_last[4], s_idle_at[4];
-+/* Busy % of each core since the last call, counting every thread of every
-+ * process; -1 when the core cannot be visited (core 3 is the system's). */
-+static void sprof_core_load(double load[4])
-+{
-+    int32_t pref; uint64_t mask;
-+    for (unsigned c = 0; c < 4; c++) load[c] = -1;
-+    if (svcGetThreadCoreMask(&pref, &mask, SPROF_CUR_THREAD) != 0) return;
-+    for (unsigned c = 0; c < 4; c++) {
-+        if (svcSetThreadCoreMask(SPROF_CUR_THREAD, (int32_t)c, 1u << c) != 0) continue;
-+        for (int i = 0; i < 50 && svcGetCurrentProcessorNumber() != c; i++) svcSleepThread(-1);
-+        if (svcGetCurrentProcessorNumber() != c) continue;
-+        uint64_t idle;
-+        if (svcGetInfo(&idle, 10 /* IdleTickCount */, 0, ~0ull) != 0) continue;
-+        const uint64_t now = svcGetSystemTick();
-+        if (s_idle_at[c] && now > s_idle_at[c] && idle >= s_idle_last[c])
-+            load[c] = 100.0 * (1.0 - (double)(idle - s_idle_last[c]) / (double)(now - s_idle_at[c]));
-+        s_idle_last[c] = idle; s_idle_at[c] = now;
-+    }
-+    svcSetThreadCoreMask(SPROF_CUR_THREAD, pref, (uint32_t)mask);
-+}
-+#endif
-+__thread sprof_slot* t_sprof;
-+static sprof_slot s_sprof[SPROF_SLOTS];
-+static int s_sprof_period = -1;                 /* -1 = environment not read */
-+static pthread_mutex_t s_sprof_reg = PTHREAD_MUTEX_INITIALIZER;
-+
-+static uint64_t s_sp_runs[SPROF_WIDS], s_sp_empty[SPROF_WIDS], s_sp_wake[SPROF_WIDS],
-+                s_sp_wake_max[SPROF_WIDS], s_sp_wake_slow[SPROF_WIDS], s_sp_run[SPROF_WIDS],
-+                s_sp_run_max[SPROF_WIDS];
-+static uint64_t s_sp_pass, s_sp_kickpass, s_sp_disp, s_sp_disp_probe;
-+
-+#define SP_ADD(v, n) __atomic_fetch_add(&(v), (uint64_t)(n), __ATOMIC_RELAXED)
-+#define SP_TAKE(v)   __atomic_exchange_n(&(v), (uint64_t)0, __ATOMIC_RELAXED)
-+
-+static uint64_t sprof_clock_us(void)
-+{
-+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-+    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
-+}
-+uint64_t sprof_now_us(void) { return s_sprof_period > 0 ? sprof_clock_us() : 0; }
-+
-+void sprof_pm_run(uint32_t wid, uint64_t wake_us, uint64_t run_us, unsigned polls)
-+{
-+    if (s_sprof_period <= 0 || wid >= SPROF_WIDS) return;
-+    if (wake_us > 10000000ull) wake_us = 0;     /* no stamp yet */
-+    SP_ADD(s_sp_runs[wid], 1); SP_ADD(s_sp_wake[wid], wake_us); SP_ADD(s_sp_run[wid], run_us);
-+    if (!polls) SP_ADD(s_sp_empty[wid], 1);
-+    if (wake_us > 2000) SP_ADD(s_sp_wake_slow[wid], 1);
-+    if (wake_us > s_sp_wake_max[wid]) s_sp_wake_max[wid] = wake_us;   /* racy maxima: a diagnostic */
-+    if (run_us > s_sp_run_max[wid]) s_sp_run_max[wid] = run_us;
-+}
-+void sprof_kernel_pass(int kick_pass)
-+{
-+    if (s_sprof_period <= 0) return;
-+    SP_ADD(s_sp_pass, 1); if (kick_pass) SP_ADD(s_sp_kickpass, 1);
-+}
-+void sprof_kernel_dispatch(int kicked)
-+{
-+    if (s_sprof_period <= 0) return;
-+    SP_ADD(s_sp_disp, 1); if (!kicked) SP_ADD(s_sp_disp_probe, 1);
-+}
-+
-+static void* sprof_sampler(void* p)
-+{
-+    (void)p;
-+    static uint64_t key[SPROF_KEYS]; static uint32_t hit[SPROF_KEYS];
-+    static uint32_t tot[SPROF_SLOTS], by[SPROF_SLOTS][SPROF_NSTATES];
-+    static const char* const nm[SPROF_NSTATES] = { "out", "idle", "dispatch", "run", "interp",
-+        "chwait", "lock", "sigwait", "ksleep", "kscan" };
-+    for (;;) {
-+        memset(key, 0, sizeof key); memset(hit, 0, sizeof hit);
-+        memset(tot, 0, sizeof tot); memset(by, 0, sizeof by);
-+        const uint64_t t0 = sprof_clock_us();
-+        while (sprof_clock_us() - t0 < (uint64_t)s_sprof_period * 1000000ull) {
-+            usleep(2000);
-+            for (unsigned k = 0; k < SPROF_SLOTS; k++) {
-+                sprof_slot* s = &s_sprof[k];
-+                if (!s->used) continue;
-+                const uint32_t st = s->st;
-+                if (st >= SPROF_NSTATES) continue;
-+                tot[k]++; by[k][st]++;
-+                uint32_t img = 0, pc = 0;
-+                if (st == SPROF_INTERP) {
-+                    const spu_context* c = (const spu_context*)s->ctx;
-+                    if (!c) continue;
-+                    img = (uint32_t)c->image_id; pc = c->pc & 0x3FC00u;
-+                    /* 35a: name the resident jobmod overlay (ids 200+) for job-buffer pcs */
-+                    if (c->resident_ovl >= 200 && (c->pc & 0x3FFFFu) >= 0x4000u) img = (uint32_t)c->resident_ovl;
-+                    for (int _s = 0; _s < 4; _s++) {
-+                        uint32_t _p = c->pc & 0x3FFFFu;
-+                        if (c->resident_code[_s].image_id >= 200 && _p >= c->resident_code[_s].lsa &&
-+                            _p < c->resident_code[_s].lsa + c->resident_code[_s].size) {
-+                            img = (uint32_t)c->resident_code[_s].image_id; break; }
-+                    }
-+                } else if (st == SPROF_RUN) {
-+                    pc = s->br_pc; img = pc ? (uint32_t)s->br_img : s->arg;
-+                } else if (st == SPROF_CHWAIT || st == SPROF_LOCK) {
-+                    pc = s->arg;
-+                } else continue;
-+                const uint64_t kk = ((uint64_t)k << 58) | ((uint64_t)st << 54) |
-+                                    ((uint64_t)img << 22) | (pc & 0x3FFFFFu);
-+                unsigned i = (unsigned)((kk * 0x9E3779B97F4A7C15ull) >> 53) % SPROF_KEYS, n;
-+                for (n = 0; n < SPROF_KEYS && key[i] && key[i] != kk; n++) i = (i + 1) % SPROF_KEYS;
-+                if (n == SPROF_KEYS) continue;
-+                key[i] = kk; hit[i]++;
-+            }
-+        }
-+        const double secs = (double)(sprof_clock_us() - t0) / 1e6;
-+        fprintf(stderr, "[sprof] %.1f s\n", secs);
-+#ifdef __SWITCH__
-+        double reg_tot = 0;
-+#endif
-+        for (unsigned k = 0; k < SPROF_SLOTS; k++) {
-+            if (!tot[k]) continue;
-+            char line[256]; int o = 0;
-+            double cpu_all = 0;
-+#ifdef __SWITCH__
-+            {
-+                uint64_t t;
-+                if (sprof_ticks(s_sprof[k].nxh, &t)) {
-+                    if (s_sprof[k].tick_ok && t >= s_sprof[k].tick)
-+                        cpu_all = 100.0 * (double)(t - s_sprof[k].tick) / (SPROF_TICK_HZ * secs);
-+                    s_sprof[k].tick = t; s_sprof[k].tick_ok = 1;
-+                    reg_tot += cpu_all;
-+                }
-+            }
-+#endif
-+            if (s_sprof[k].kind == 'P') {              /* PPU threads: CPU only, when it matters */
-+                if (cpu_all >= 1.0)
-+                    fprintf(stderr, "[sprof] P%u (slot %u): cpu %.1f\n", s_sprof[k].who, k, cpu_all);
-+                continue;
-+            }
-+            for (unsigned st = 0; st < SPROF_NSTATES && o < 220; st++)
-+                if (by[k][st])
-+                    o += snprintf(line + o, sizeof line - (size_t)o, " %s %.1f", nm[st], 100.0 * by[k][st] / tot[k]);
-+            fprintf(stderr, "[sprof] %c%u (slot %u, %u smp):%s | cpu %.1f\n",
-+                    s_sprof[k].kind, s_sprof[k].who, k, tot[k], line, cpu_all);
-+            for (int r = 0; r < 6; r++) {
-+                unsigned best = 0, bi = 0;
-+                for (unsigned i = 0; i < SPROF_KEYS; i++)
-+                    if ((key[i] >> 58) == k && hit[i] > best) { best = hit[i]; bi = i; }
-+                if (!best || best * 200 < tot[k]) break;       /* under 0.5 % */
-+                fprintf(stderr, "[sprof]     %5.1f%%  %s img=0x%X pc=0x%05X\n", 100.0 * best / tot[k],
-+                        nm[(key[bi] >> 54) & 15], (unsigned)((key[bi] >> 22) & 0xFFFFFFFFu),
-+                        (unsigned)(key[bi] & 0x3FFFFFu));
-+                hit[bi] = 0;
-+            }
-+        }
-+#ifdef __SWITCH__
-+        {
-+            double ld[4];
-+            sprof_core_load(ld);
-+            fprintf(stderr, "[sprof] cores busy (all threads): c0 %.1f c1 %.1f c2 %.1f c3 %.1f | registered threads cpu sum %.1f\n",
-+                    ld[0], ld[1], ld[2], ld[3], reg_tot);
-+        }
-+#endif
-+        for (unsigned w = 0; w < SPROF_WIDS; w++) {
-+            const uint64_t runs = SP_TAKE(s_sp_runs[w]);
-+            const uint64_t empty = SP_TAKE(s_sp_empty[w]), wake = SP_TAKE(s_sp_wake[w]),
-+                           slow = SP_TAKE(s_sp_wake_slow[w]), run = SP_TAKE(s_sp_run[w]),
-+                           wmax = SP_TAKE(s_sp_wake_max[w]), rmax = SP_TAKE(s_sp_run_max[w]);
-+            if (!runs) continue;
-+            fprintf(stderr, "[sprof] pm wid=%u: %.0f runs/s (%.0f%% found no work), wake avg %llu us max %llu us"
-+                            " (%llu over 2 ms), run avg %llu us max %llu us, %.1f%% of a thread\n",
-+                    w, (double)runs / secs, 100.0 * (double)empty / (double)runs,
-+                    (unsigned long long)(wake / runs), (unsigned long long)wmax, (unsigned long long)slow,
-+                    (unsigned long long)(run / runs), (unsigned long long)rmax,
-+                    (double)run / (secs * 1e4));
-+        }
-+        { const uint64_t pass = SP_TAKE(s_sp_pass), kp = SP_TAKE(s_sp_kickpass),
-+                         d = SP_TAKE(s_sp_disp), dp = SP_TAKE(s_sp_disp_probe);
-+          fprintf(stderr, "[sprof] kernel: %.0f passes/s (%.0f kick), %.0f dispatches/s (%.0f by idle probe)\n",
-+                  (double)pass / secs, (double)kp / secs, (double)d / secs, (double)dp / secs); }
-+        fflush(stderr);
-+    }
-+    return NULL;
-+}
-+
-+void sprof_thread(char kind, uint32_t who)
-+{
-+    if (s_sprof_period < 0) {
-+        pthread_mutex_lock(&s_sprof_reg);
-+        if (s_sprof_period < 0) {
-+            const char* e = getenv("SPU_PROF");
-+            int period = e ? atoi(e) : 0;
-+            if (period > 0) {
-+                pthread_t th;
-+                if (pthread_create(&th, NULL, sprof_sampler, NULL) == 0) pthread_detach(th);
-+                else period = 0;
-+            }
-+            s_sprof_period = period > 0 ? period : 0;
-+        }
-+        pthread_mutex_unlock(&s_sprof_reg);
-+    }
-+    if (s_sprof_period <= 0 || t_sprof) return;
-+    pthread_mutex_lock(&s_sprof_reg);
-+    for (unsigned k = 0; k < SPROF_SLOTS; k++)
-+        if (!s_sprof[k].used) {
-+            sprof_slot* s = &s_sprof[k];
-+            s->st = SPROF_OUT; s->arg = 0; s->ctx = NULL; s->br_pc = 0;
-+            s->kind = kind; s->who = who;
-+            s->tick = 0; s->tick_ok = 0;
-+#ifdef __SWITCH__
-+            s->nxh = threadGetCurHandle();
-+#endif
-+            s->used = 1;
-+            t_sprof = s;
-+            break;
-+        }
-+    pthread_mutex_unlock(&s_sprof_reg);
-+}
-+
-+void sprof_thread_exit(void)
-+{
-+    sprof_slot* s = t_sprof;
-+    if (s) { t_sprof = NULL; s->used = 0; }
-+}
-+#endif /* !_WIN32 */
 diff --git a/libs/video/l4f_trace.c b/libs/video/l4f_trace.c
 new file mode 100644
 index 00000000..0925ff20
@@ -3394,3 +4470,433 @@ index 00000000..2948ccfd
 +}
 +
 +#endif
+diff --git a/runtime/spu/spu_memwait.c b/runtime/spu/spu_memwait.c
+new file mode 100644
+index 00000000..708021da
+--- /dev/null
++++ b/runtime/spu/spu_memwait.c
+@@ -0,0 +1,85 @@
++/* 128: wait-for-write instead of Sleep(1) for an SPU job polling guest memory.
++ *
++ * The DMA repeat limiter (spu_dma.h) used to back a job that re-reads the
++ * same word (EDGE waiting for ring space by re-reading the segment label the
++ * RSX walker releases) off with Sleep(1) per poll, landing it up to 1 ms late
++ * on every wait. Now the poller sleeps on a global write epoch that the
++ * producers bump (RSX label releases, SPU PUTs), bounded by SPU_DMA_WAIT_US
++ * (default 200 us) for writers that do not announce themselves (PPU stores).
++ * SPU_DMA_WAIT_US=0 keeps the old yield/Sleep(1) path. Design: Codex
++ * (port/pend128/codex_wait.txt), reviewed. */
++#include "spu_memwait.h"
++#include <stdatomic.h>
++#include <limits.h>
++#include <stdlib.h>
++#include <string.h>
++#if defined(__SWITCH__)
++#include <switch.h>
++#elif defined(_WIN32)
++#include <windows.h>
++#else
++#include <unistd.h>
++#endif
++
++_Atomic(uint32_t) g_ps3_mem_write_epoch = 0;
++static _Atomic(uint32_t) g_waiters = 0;
++static _Atomic(uint32_t) g_wait_us = UINT32_MAX;
++
++uint32_t ps3_memwait_timeout_us(void)
++{
++    uint32_t v = atomic_load_explicit(&g_wait_us, memory_order_acquire);
++    if (v == UINT32_MAX) {
++        const char* e = getenv("SPU_DMA_WAIT_US");
++        unsigned long n = e ? strtoul(e, 0, 0) : 0ul;   /* 129: def. off (128 fue 29 % mas lenta) */
++        uint32_t want = n >= UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)n;
++        atomic_compare_exchange_strong_explicit(&g_wait_us, &v, want,
++                                                memory_order_release, memory_order_acquire);
++        v = atomic_load_explicit(&g_wait_us, memory_order_acquire);
++    }
++    return v;
++}
++
++void ps3_mem_written(uint32_t ea, uint32_t size)
++{
++    (void)ea; (void)size;   /* one global epoch: any write may be the one */
++    if (!atomic_load_explicit(&g_waiters, memory_order_relaxed))
++        return;
++    atomic_fetch_add_explicit(&g_ps3_mem_write_epoch, 1, memory_order_release);
++#if defined(__SWITCH__)
++    svcSignalToAddress((void*)&g_ps3_mem_write_epoch, SignalType_Signal, 0, -1);
++#elif defined(_WIN32)
++    WakeByAddressAll((void*)&g_ps3_mem_write_epoch);
++#endif
++}
++
++static void wait_epoch(uint32_t epoch, uint32_t us)
++{
++#if defined(__SWITCH__)
++    svcWaitForAddress((void*)&g_ps3_mem_write_epoch, ArbitrationType_WaitIfEqual,
++                      (s64)(s32)epoch, (s64)us * 1000);
++#elif defined(_WIN32)
++    DWORD ms = us / 1000u + !!(us % 1000u);
++    WaitOnAddress((volatile void*)&g_ps3_mem_write_epoch, &epoch, sizeof(epoch), ms);
++#else
++    (void)epoch; usleep(us);
++#endif
++}
++
++int ps3_memwait_unchanged(struct ps3_memwait_state* s, const void* p, size_t n)
++{
++    uint32_t us = ps3_memwait_timeout_us();
++    if (!us || !n || n > sizeof(s->copy))
++        return 0;
++    if (s->valid != n || memcmp(p, s->copy, n)) {
++        memcpy(s->copy, p, n);
++        s->valid = (uint32_t)n;
++        return 0;   /* value moved since the last poll: let the GET read it now */
++    }
++    uint32_t epoch = atomic_load_explicit(&g_ps3_mem_write_epoch, memory_order_acquire);
++    atomic_fetch_add_explicit(&g_waiters, 1, memory_order_acq_rel);
++    if (atomic_load_explicit(&g_ps3_mem_write_epoch, memory_order_acquire) == epoch &&
++        !memcmp(p, s->copy, n))
++        wait_epoch(epoch, us);
++    atomic_fetch_sub_explicit(&g_waiters, 1, memory_order_acq_rel);
++    return 1;
++}
+diff --git a/runtime/spu/spu_memwait.h b/runtime/spu/spu_memwait.h
+new file mode 100644
+index 00000000..b183e544
+--- /dev/null
++++ b/runtime/spu/spu_memwait.h
+@@ -0,0 +1,26 @@
++/* 128: wait-for-write for SPU pollers (see spu_memwait.c). */
++#pragma once
++#include <stddef.h>
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Per-thread snapshot of the bytes the poller saw last (polls are small). */
++struct ps3_memwait_state {
++    uint32_t valid;
++    unsigned char copy[256];
++};
++
++/* Call after guest memory has been made visible to other agents. */
++void ps3_mem_written(uint32_t ea, uint32_t size);
++uint32_t ps3_memwait_timeout_us(void);
++/* 1 if the bytes equal the last snapshot (and it waited for a write or the
++ * timeout), 0 if they changed or waiting is off. */
++int ps3_memwait_unchanged(struct ps3_memwait_state* s, const void* p, size_t n);
++
++static inline void ps3_memwait_reset(struct ps3_memwait_state* s) { s->valid = 0; }
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/runtime/spu/spu_prof_impl.inc b/runtime/spu/spu_prof_impl.inc
+new file mode 100644
+index 00000000..fe7de104
+--- /dev/null
++++ b/runtime/spu/spu_prof_impl.inc
+@@ -0,0 +1,301 @@
++/* SPU_PROF sampler and counters (see include/ps3emu/spu_prof.h). Included at
++ * the end of spu_channels.c, which has spu_context. POSIX hosts only. */
++volatile int g_sprof_edge_run;   /* 123: EDGE wids (8-10) in a policy-module run now */
++#ifndef _WIN32
++#include <pthread.h>
++#include <unistd.h>
++#include <string.h>
++#include <time.h>
++
++enum { SPROF_SLOTS = 96, SPROF_KEYS = 2048, SPROF_WIDS = 32 };
++
++/* Switch: real CPU time per thread (svcGetInfo ThreadTickCount, subtype -1:
++ * mesosphere returns 0 for the per-core subtypes) and busy % per core
++ * (IdleTickCount, readable only for the caller's own core, so the sampler
++ * visits each core). Declared here instead of including <switch.h> (its
++ * u8..u64 clash with the runtime's). */
++#ifdef __SWITCH__
++extern uint32_t svcGetInfo(uint64_t* out, uint32_t id0, uint32_t handle, uint64_t id1);
++extern uint32_t threadGetCurHandle(void);
++extern uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t preferred_core, uint32_t affinity_mask);
++extern uint32_t svcGetThreadCoreMask(int32_t* preferred_core, uint64_t* affinity_mask, uint32_t handle);
++extern uint32_t svcGetCurrentProcessorNumber(void);
++extern uint64_t svcGetSystemTick(void);
++extern void     svcSleepThread(int64_t nano);
++#define SPROF_TICK_HZ 19200000.0
++#define SPROF_CUR_THREAD 0xFFFF8000u
++static int sprof_ticks(uint32_t h, uint64_t* out)
++{
++    static int s_warned;
++    const uint32_t rc = h ? svcGetInfo(out, 25u /* ThreadTickCount (13.0.0+; 0xF0000002 was removed) */, h, ~0ull) : 0xFFFFFFFFu;
++    if (rc && !s_warned) {
++        s_warned = 1;
++        uint64_t self = 0;
++        const uint32_t rc_self = svcGetInfo(&self, 25u, SPROF_CUR_THREAD, ~0ull);
++        fprintf(stderr, "[sprof] ThreadTickCount failed: rc=0x%X h=0x%X (own pseudo-handle: rc=0x%X ticks=%llu, own handle 0x%X)\n",
++                rc, h, rc_self, (unsigned long long)self, threadGetCurHandle());
++    }
++    return rc == 0;
++}
++static uint64_t s_idle_last[4], s_idle_at[4];
++/* Busy % of each core since the last call, counting every thread of every
++ * process; -1 when the core cannot be visited (core 3 is the system's). */
++static void sprof_core_load(double load[4])
++{
++    int32_t pref; uint64_t mask;
++    for (unsigned c = 0; c < 4; c++) load[c] = -1;
++    if (svcGetThreadCoreMask(&pref, &mask, SPROF_CUR_THREAD) != 0) return;
++    for (unsigned c = 0; c < 4; c++) {
++        if (svcSetThreadCoreMask(SPROF_CUR_THREAD, (int32_t)c, 1u << c) != 0) continue;
++        for (int i = 0; i < 50 && svcGetCurrentProcessorNumber() != c; i++) svcSleepThread(-1);
++        if (svcGetCurrentProcessorNumber() != c) continue;
++        uint64_t idle;
++        if (svcGetInfo(&idle, 10 /* IdleTickCount */, 0, ~0ull) != 0) continue;
++        const uint64_t now = svcGetSystemTick();
++        if (s_idle_at[c] && now > s_idle_at[c] && idle >= s_idle_last[c])
++            load[c] = 100.0 * (1.0 - (double)(idle - s_idle_last[c]) / (double)(now - s_idle_at[c]));
++        s_idle_last[c] = idle; s_idle_at[c] = now;
++    }
++    svcSetThreadCoreMask(SPROF_CUR_THREAD, pref, (uint32_t)mask);
++}
++#endif
++__thread sprof_slot* t_sprof;
++static sprof_slot s_sprof[SPROF_SLOTS];
++static int s_sprof_period = -1;                 /* -1 = environment not read */
++static pthread_mutex_t s_sprof_reg = PTHREAD_MUTEX_INITIALIZER;
++
++static uint64_t s_sp_runs[SPROF_WIDS], s_sp_empty[SPROF_WIDS], s_sp_wake[SPROF_WIDS],
++                s_sp_wake_max[SPROF_WIDS], s_sp_wake_slow[SPROF_WIDS], s_sp_run[SPROF_WIDS],
++                s_sp_run_max[SPROF_WIDS];
++static uint64_t s_sp_pass, s_sp_kickpass, s_sp_disp, s_sp_disp_probe;
++
++#define SP_ADD(v, n) __atomic_fetch_add(&(v), (uint64_t)(n), __ATOMIC_RELAXED)
++#define SP_TAKE(v)   __atomic_exchange_n(&(v), (uint64_t)0, __ATOMIC_RELAXED)
++
++static uint64_t sprof_clock_us(void)
++{
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
++}
++uint64_t sprof_now_us(void) { return s_sprof_period > 0 ? sprof_clock_us() : 0; }
++
++void sprof_pm_run(uint32_t wid, uint64_t wake_us, uint64_t run_us, unsigned polls)
++{
++    if (s_sprof_period <= 0 || wid >= SPROF_WIDS) return;
++    if (wake_us > 10000000ull) wake_us = 0;     /* no stamp yet */
++    SP_ADD(s_sp_runs[wid], 1); SP_ADD(s_sp_wake[wid], wake_us); SP_ADD(s_sp_run[wid], run_us);
++    if (!polls) SP_ADD(s_sp_empty[wid], 1);
++    if (wake_us > 2000) SP_ADD(s_sp_wake_slow[wid], 1);
++    if (wake_us > s_sp_wake_max[wid]) s_sp_wake_max[wid] = wake_us;   /* racy maxima: a diagnostic */
++    if (run_us > s_sp_run_max[wid]) s_sp_run_max[wid] = run_us;
++}
++void sprof_kernel_pass(int kick_pass)
++{
++    if (s_sprof_period <= 0) return;
++    SP_ADD(s_sp_pass, 1); if (kick_pass) SP_ADD(s_sp_kickpass, 1);
++}
++void sprof_kernel_dispatch(int kicked)
++{
++    if (s_sprof_period <= 0) return;
++    SP_ADD(s_sp_disp, 1); if (!kicked) SP_ADD(s_sp_disp_probe, 1);
++}
++
++static void* sprof_sampler(void* p)
++{
++    (void)p;
++    static uint64_t key[SPROF_KEYS]; static uint32_t hit[SPROF_KEYS];
++    static uint32_t tot[SPROF_SLOTS], by[SPROF_SLOTS][SPROF_NSTATES];
++    static const char* const nm[SPROF_NSTATES] = { "out", "idle", "dispatch", "run", "interp",
++        "chwait", "lock", "sigwait", "ksleep", "kscan" };
++    for (;;) {
++        memset(key, 0, sizeof key); memset(hit, 0, sizeof hit);
++        memset(tot, 0, sizeof tot); memset(by, 0, sizeof by);
++        const uint64_t t0 = sprof_clock_us();
++        /* PS3_WAITCNT_WATCH: split SPU-thread samples by whether the watched
++         * PPU waiter is polling right now -> what the SPUs run while it waits. */
++        static uint64_t wkey[64]; static uint32_t whit[64], wtick[2], wsmp[2];
++        memset(wkey, 0, sizeof wkey); memset(whit, 0, sizeof whit);
++        memset(wtick, 0, sizeof wtick); memset(wsmp, 0, sizeof wsmp);
++        static uint32_t eh[2][4]; memset(eh, 0, sizeof eh);   /* 123: EDGE runs at once, by main-wait */
++#define SPROF_W(st_, img_) do { if (wn && s->kind != 'P') { wsmp[inw]++; \
++            const uint64_t wk_ = ((uint64_t)(inw + 1) << 60) | ((uint64_t)(st_) << 54) | (img_); unsigned j_; \
++            for (j_ = 0; j_ < 64 && wkey[j_] && wkey[j_] != wk_; j_++) {} \
++            if (j_ < 64) { wkey[j_] = wk_; whit[j_]++; } } } while (0)
++        while (sprof_clock_us() - t0 < (uint64_t)s_sprof_period * 1000000ull) {
++            usleep(2000);
++            const int wn = atomic_load_explicit(&g_waitcnt_n, memory_order_relaxed);
++            int inw = 0;
++            if (wn) { const uint64_t now = ps3_qpc_us();
++                for (int i = 0; i < wn; i++)
++                    if (atomic_load_explicit(&g_waitcnt_slots[i].wait_start_us, memory_order_relaxed) &&
++                        now - atomic_load_explicit(&g_waitcnt_slots[i].last_poll_us, memory_order_relaxed) < 2000) inw = 1;
++                wtick[inw]++; }
++            { int ne = g_sprof_edge_run; ne = ne < 0 ? 0 : ne > 3 ? 3 : ne; eh[inw][ne]++; }
++            for (unsigned k = 0; k < SPROF_SLOTS; k++) {
++                sprof_slot* s = &s_sprof[k];
++                if (!s->used) continue;
++                const uint32_t st = s->st;
++                if (st >= SPROF_NSTATES) continue;
++                tot[k]++; by[k][st]++;
++                if (st != SPROF_INTERP && st != SPROF_RUN) SPROF_W(st, 0);
++                uint32_t img = 0, pc = 0;
++                if (st == SPROF_INTERP) {
++                    const spu_context* c = (const spu_context*)s->ctx;
++                    if (!c) continue;
++                    img = (uint32_t)c->image_id; pc = c->pc & 0x3FC00u;
++                    /* 35a: name the resident jobmod overlay (ids 200+) for job-buffer pcs */
++                    if (c->resident_ovl >= 200 && (c->pc & 0x3FFFFu) >= 0x4000u) img = (uint32_t)c->resident_ovl;
++                    for (int _s = 0; _s < 4; _s++) {
++                        uint32_t _p = c->pc & 0x3FFFFu;
++                        if (c->resident_code[_s].image_id >= 200 && _p >= c->resident_code[_s].lsa &&
++                            _p < c->resident_code[_s].lsa + c->resident_code[_s].size) {
++                            img = (uint32_t)c->resident_code[_s].image_id; break; }
++                    }
++                } else if (st == SPROF_RUN) {
++                    pc = s->br_pc; img = pc ? (uint32_t)s->br_img : s->arg;
++                } else if (st == SPROF_CHWAIT || st == SPROF_LOCK) {
++                    pc = s->arg;
++                } else continue;
++                if (st == SPROF_INTERP || st == SPROF_RUN) SPROF_W(st, img);
++                const uint64_t kk = ((uint64_t)k << 58) | ((uint64_t)st << 54) |
++                                    ((uint64_t)img << 22) | (pc & 0x3FFFFFu);
++                unsigned i = (unsigned)((kk * 0x9E3779B97F4A7C15ull) >> 53) % SPROF_KEYS, n;
++                for (n = 0; n < SPROF_KEYS && key[i] && key[i] != kk; n++) i = (i + 1) % SPROF_KEYS;
++                if (n == SPROF_KEYS) continue;
++                key[i] = kk; hit[i]++;
++            }
++        }
++        const double secs = (double)(sprof_clock_us() - t0) / 1e6;
++        fprintf(stderr, "[sprof] %.1f s\n", secs);
++#ifdef __SWITCH__
++        double reg_tot = 0;
++#endif
++        for (unsigned k = 0; k < SPROF_SLOTS; k++) {
++            if (!tot[k]) continue;
++            char line[256]; int o = 0;
++            double cpu_all = 0;
++#ifdef __SWITCH__
++            {
++                uint64_t t;
++                if (sprof_ticks(s_sprof[k].nxh, &t)) {
++                    if (s_sprof[k].tick_ok && t >= s_sprof[k].tick)
++                        cpu_all = 100.0 * (double)(t - s_sprof[k].tick) / (SPROF_TICK_HZ * secs);
++                    s_sprof[k].tick = t; s_sprof[k].tick_ok = 1;
++                    reg_tot += cpu_all;
++                }
++            }
++#endif
++            if (s_sprof[k].kind == 'P') {              /* PPU threads: CPU only, when it matters */
++                if (cpu_all >= 1.0)
++                    fprintf(stderr, "[sprof] P%u (slot %u): cpu %.1f\n", s_sprof[k].who, k, cpu_all);
++                continue;
++            }
++            for (unsigned st = 0; st < SPROF_NSTATES && o < 220; st++)
++                if (by[k][st])
++                    o += snprintf(line + o, sizeof line - (size_t)o, " %s %.1f", nm[st], 100.0 * by[k][st] / tot[k]);
++            fprintf(stderr, "[sprof] %c%u (slot %u, %u smp):%s | cpu %.1f\n",
++                    s_sprof[k].kind, s_sprof[k].who, k, tot[k], line, cpu_all);
++            for (int r = 0; r < 6; r++) {
++                unsigned best = 0, bi = 0;
++                for (unsigned i = 0; i < SPROF_KEYS; i++)
++                    if ((key[i] >> 58) == k && hit[i] > best) { best = hit[i]; bi = i; }
++                if (!best || best * 200 < tot[k]) break;       /* under 0.5 % */
++                fprintf(stderr, "[sprof]     %5.1f%%  %s img=0x%X pc=0x%05X\n", 100.0 * best / tot[k],
++                        nm[(key[bi] >> 54) & 15], (unsigned)((key[bi] >> 22) & 0xFFFFFFFFu),
++                        (unsigned)(key[bi] & 0x3FFFFFu));
++                hit[bi] = 0;
++            }
++        }
++        if (wtick[0] + wtick[1]) {   /* share of SPU-thread samples, in wait vs not */
++            fprintf(stderr, "[sprof] waitcnt: main waiting %.1f%% of ticks; spu smp in=%u out=%u\n",
++                    100.0 * wtick[1] / (wtick[0] + wtick[1]), wsmp[1], wsmp[0]);
++            for (int r = 0; r < 12; r++) {
++                unsigned best = 0, bi = 0;
++                for (unsigned i = 0; i < 64; i++)
++                    if ((wkey[i] >> 60) == 2 && whit[i] > best) { best = whit[i]; bi = i; }
++                if (!best) break;
++                const uint64_t ok = (wkey[bi] & ~(3ull << 60)) | (1ull << 60); unsigned out = 0;
++                for (unsigned i = 0; i < 64; i++) if (wkey[i] == ok) out = whit[i];
++                fprintf(stderr, "[sprof]   wait %5.1f%% (not-wait %5.1f%%)  %s img=0x%X\n",
++                        100.0 * best / (wsmp[1] ? wsmp[1] : 1), 100.0 * out / (wsmp[0] ? wsmp[0] : 1),
++                        nm[(wkey[bi] >> 54) & 15], (unsigned)(wkey[bi] & 0xFFFFFFFFu));
++                whit[bi] = 0;
++            }
++        }
++        for (int w = 1; w >= 0; w--) {   /* 123: how many EDGE wids run at once */
++            const uint32_t n = eh[w][0] + eh[w][1] + eh[w][2] + eh[w][3];
++            if (n) fprintf(stderr, "[sprof] edge-par %s: %u ticks, 0/1/2/3 at once = %.0f/%.0f/%.0f/%.0f%%\n",
++                           w ? "main-wait" : "other", n, 100.0 * eh[w][0] / n, 100.0 * eh[w][1] / n,
++                           100.0 * eh[w][2] / n, 100.0 * eh[w][3] / n);
++        }
++#undef SPROF_W
++#ifdef __SWITCH__
++        {
++            double ld[4];
++            sprof_core_load(ld);
++            fprintf(stderr, "[sprof] cores busy (all threads): c0 %.1f c1 %.1f c2 %.1f c3 %.1f | registered threads cpu sum %.1f\n",
++                    ld[0], ld[1], ld[2], ld[3], reg_tot);
++        }
++#endif
++        for (unsigned w = 0; w < SPROF_WIDS; w++) {
++            const uint64_t runs = SP_TAKE(s_sp_runs[w]);
++            const uint64_t empty = SP_TAKE(s_sp_empty[w]), wake = SP_TAKE(s_sp_wake[w]),
++                           slow = SP_TAKE(s_sp_wake_slow[w]), run = SP_TAKE(s_sp_run[w]),
++                           wmax = SP_TAKE(s_sp_wake_max[w]), rmax = SP_TAKE(s_sp_run_max[w]);
++            if (!runs) continue;
++            fprintf(stderr, "[sprof] pm wid=%u: %.0f runs/s (%.0f%% found no work), wake avg %llu us max %llu us"
++                            " (%llu over 2 ms), run avg %llu us max %llu us, %.1f%% of a thread\n",
++                    w, (double)runs / secs, 100.0 * (double)empty / (double)runs,
++                    (unsigned long long)(wake / runs), (unsigned long long)wmax, (unsigned long long)slow,
++                    (unsigned long long)(run / runs), (unsigned long long)rmax,
++                    (double)run / (secs * 1e4));
++        }
++        { const uint64_t pass = SP_TAKE(s_sp_pass), kp = SP_TAKE(s_sp_kickpass),
++                         d = SP_TAKE(s_sp_disp), dp = SP_TAKE(s_sp_disp_probe);
++          fprintf(stderr, "[sprof] kernel: %.0f passes/s (%.0f kick), %.0f dispatches/s (%.0f by idle probe)\n",
++                  (double)pass / secs, (double)kp / secs, (double)d / secs, (double)dp / secs); }
++        fflush(stderr);
++    }
++    return NULL;
++}
++
++void sprof_thread(char kind, uint32_t who)
++{
++    if (s_sprof_period < 0) {
++        pthread_mutex_lock(&s_sprof_reg);
++        if (s_sprof_period < 0) {
++            const char* e = getenv("SPU_PROF");
++            int period = e ? atoi(e) : 0;
++            if (period > 0) {
++                pthread_t th;
++                if (pthread_create(&th, NULL, sprof_sampler, NULL) == 0) pthread_detach(th);
++                else period = 0;
++            }
++            s_sprof_period = period > 0 ? period : 0;
++        }
++        pthread_mutex_unlock(&s_sprof_reg);
++    }
++    if (s_sprof_period <= 0 || t_sprof) return;
++    pthread_mutex_lock(&s_sprof_reg);
++    for (unsigned k = 0; k < SPROF_SLOTS; k++)
++        if (!s_sprof[k].used) {
++            sprof_slot* s = &s_sprof[k];
++            s->st = SPROF_OUT; s->arg = 0; s->ctx = NULL; s->br_pc = 0;
++            s->kind = kind; s->who = who;
++            s->tick = 0; s->tick_ok = 0;
++#ifdef __SWITCH__
++            s->nxh = threadGetCurHandle();
++#endif
++            s->used = 1;
++            t_sprof = s;
++            break;
++        }
++    pthread_mutex_unlock(&s_sprof_reg);
++}
++
++void sprof_thread_exit(void)
++{
++    sprof_slot* s = t_sprof;
++    if (s) { t_sprof = NULL; s->used = 0; }
++}
++#endif /* !_WIN32 */
